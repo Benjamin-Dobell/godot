@@ -8,7 +8,7 @@ from platform_methods import get_build_version
 
 def run_closure_compiler(target, source, env, for_signature):
     closure_bin = os.path.join(
-        os.path.dirname(WhereIs("emcc")),
+        "/opt/homebrew/Cellar/emscripten/4.0.19/libexec",
         "node_modules",
         ".bin",
         "google-closure-compiler",
