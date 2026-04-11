@@ -33,7 +33,11 @@
 #include "servers/camera/camera_feed.h"
 #include "servers/camera/camera_server.h"
 
-#include "platform/web/camera_driver_web.h"
+// Shared camera data types — kept in a platform/web-level header so this
+// module does not need to include the full CameraDriverWeb driver header.
+#include "platform/web/camera_types_web.h"
+
+class CameraDriverWeb;
 
 class CameraFeedWeb : public CameraFeed {
 	GDSOFTCLASS(CameraFeedWeb, CameraFeed);
