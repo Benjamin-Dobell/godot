@@ -153,6 +153,32 @@ const GodotCamera = {
 		},
 
 		/**
+		 * Returns the actual visible pixel rectangle for a VideoFrame.
+		 * Some camera frames are coded with padding/crop metadata; copying from (0, 0)
+		 * with display dimensions can read only the top-left portion of a portrait feed.
+		 * @param {VideoFrame} videoFrame Source frame.
+		 * @returns {{x: number, y: number, width: number, height: number}} Copy rectangle.
+		 */
+		getVideoFrameVisibleRect: function (videoFrame) {
+			const visibleRect = videoFrame.visibleRect;
+			if (visibleRect && visibleRect.width > 0 && visibleRect.height > 0) {
+				return {
+					x: visibleRect.x,
+					y: visibleRect.y,
+					width: visibleRect.width,
+					height: visibleRect.height,
+				};
+			}
+
+			return {
+				x: 0,
+				y: 0,
+				width: videoFrame.displayWidth,
+				height: videoFrame.displayHeight,
+			};
+		},
+
+		/**
 		 * Checks if WebCodecs API is supported for camera capture.
 		 * @returns {boolean} True if MediaStreamTrackProcessor and VideoFrame are available
 		 */
@@ -280,8 +306,22 @@ function processImageBitmap(imageBitmap) {
 
 // Process VideoFrame using WebCodecs copyTo (most efficient)
 async function processVideoFrame(videoFrame) {
-	const frameWidth = videoFrame.displayWidth;
-	const frameHeight = videoFrame.displayHeight;
+	const visibleRect = videoFrame.visibleRect;
+	const copyRect = visibleRect && visibleRect.width > 0 && visibleRect.height > 0
+		? {
+			x: visibleRect.x,
+			y: visibleRect.y,
+			width: visibleRect.width,
+			height: visibleRect.height,
+		}
+		: {
+			x: 0,
+			y: 0,
+			width: videoFrame.displayWidth,
+			height: videoFrame.displayHeight,
+		};
+	const frameWidth = copyRect.width;
+	const frameHeight = copyRect.height;
 	const requiredSize = frameWidth * frameHeight * 4;
 
 	ensureBufferPool(requiredSize);
@@ -296,7 +336,7 @@ async function processVideoFrame(videoFrame) {
 
 	try {
 		await videoFrame.copyTo(pixelBuffer, {
-			rect: { x: 0, y: 0, width: frameWidth, height: frameHeight },
+			rect: copyRect,
 			layout: [{ offset: 0, stride: frameWidth * 4 }],
 			format: 'RGBA',
 		});
@@ -571,14 +611,15 @@ self.onmessage = async function(event) {
 						}
 
 						try {
-							const width = videoFrame.displayWidth;
-							const height = videoFrame.displayHeight;
+							const copyRect = GodotCamera.getVideoFrameVisibleRect(videoFrame);
+							const width = copyRect.width;
+							const height = copyRect.height;
 							const bufferSize = width * height * 4;
 							const pixelBuffer = new Uint8Array(bufferSize);
 
 							// eslint-disable-next-line no-await-in-loop
 							await videoFrame.copyTo(pixelBuffer, {
-								rect: { x: 0, y: 0, width, height },
+								rect: copyRect,
 								layout: [{ offset: 0, stride: width * 4 }],
 								format: 'RGBA',
 							});
