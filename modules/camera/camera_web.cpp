@@ -70,7 +70,6 @@ void CameraFeedWeb::_on_get_pixel_data(void *p_context, const uint8_t *p_data, c
 		feed->position = CameraFeed::FEED_BACK;
 	}
 
-	Vector<uint8_t> &data = feed->data;
 	Ref<Image> image = feed->image;
 
 	const int64_t expected_size = Image::get_image_data_size(p_width, p_height, Image::FORMAT_RGBA8, false);
@@ -82,13 +81,18 @@ void CameraFeedWeb::_on_get_pixel_data(void *p_context, const uint8_t *p_data, c
 		return;
 	}
 
-	if (data.size() != expected_size) {
-		data.resize(expected_size);
+	if (image.is_null()) {
+		image.instantiate();
+		feed->image = image;
 	}
-	// Copy exactly the expected size (ignore any trailing bytes in 'p_data').
-	memcpy(data.ptrw(), p_data, expected_size);
 
-	image->initialize_data(p_width, p_height, false, Image::FORMAT_RGBA8, data);
+	if (image->get_width() != p_width || image->get_height() != p_height || image->get_format() != Image::FORMAT_RGBA8 || image->has_mipmaps()) {
+		image->initialize_data(p_width, p_height, false, Image::FORMAT_RGBA8);
+	}
+
+	// Copy exactly the expected size (ignore any trailing bytes in 'p_data').
+	memcpy(image->ptrw(), p_data, expected_size);
+
 	feed->set_rgb_image(image);
 }
 
@@ -137,7 +141,6 @@ void CameraFeedWeb::deactivate_feed() {
 
 	// Release the image when deactivating the feed.
 	image.unref();
-	data.clear();
 }
 
 bool CameraFeedWeb::set_format(int p_index, const Dictionary &p_parameters) {
