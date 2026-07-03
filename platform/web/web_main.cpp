@@ -58,6 +58,14 @@ static uint64_t target_ticks = 0;
 static bool main_started = false;
 static bool shutdown_complete = false;
 
+static DisplayServerWeb *get_web_display_server() {
+	DisplayServer *display_server = DisplayServer::get_singleton();
+	if (!display_server || display_server->get_name() != "web") {
+		return nullptr;
+	}
+	return static_cast<DisplayServerWeb *>(display_server);
+}
+
 void exit_callback() {
 	if (!shutdown_complete) {
 		return; // Still waiting.
@@ -82,7 +90,10 @@ void main_loop_callback() {
 	uint64_t current_ticks = os->get_ticks_usec();
 #endif
 
-	bool force_draw = DisplayServerWeb::get_singleton()->check_size_force_redraw();
+	bool force_draw = false;
+	if (DisplayServerWeb *web_display_server = get_web_display_server()) {
+		force_draw = web_display_server->check_size_force_redraw();
+	}
 	if (force_draw) {
 		Main::force_redraw();
 #ifndef PROXY_TO_PTHREAD_ENABLED

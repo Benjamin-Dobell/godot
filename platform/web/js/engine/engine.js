@@ -44,7 +44,7 @@ const Engine = (function () {
 		if (loadPromise == null) {
 			loadPath = basePath;
 			loadPromise = preloader.loadPromise(`${loadPath}.wasm`, size, true);
-			requestAnimationFrame(preloader.animateProgress);
+			preloader.animateProgress();
 		}
 		return loadPromise;
 	};
@@ -240,9 +240,10 @@ const Engine = (function () {
 			 * @returns {Promise} The service worker registration promise.
 			 */
 			installServiceWorker: function () {
-				if (this.config.serviceWorker && 'serviceWorker' in navigator) {
+				const nav = typeof navigator !== 'undefined' ? navigator : null;
+				if (this.config.serviceWorker && nav && 'serviceWorker' in nav) {
 					try {
-						return navigator.serviceWorker.register(this.config.serviceWorker);
+						return nav.serviceWorker.register(this.config.serviceWorker);
 					} catch (e) {
 						return Promise.reject(e);
 					}
@@ -281,6 +282,8 @@ const Engine = (function () {
 
 	return SafeEngine;
 }());
-if (typeof window !== 'undefined') {
+if (typeof globalThis !== 'undefined') {
+	globalThis['Engine'] = Engine;
+} else if (typeof window !== 'undefined') {
 	window['Engine'] = Engine;
 }

@@ -276,6 +276,24 @@ const InternalConfig = function (initConfig) { // eslint-disable-line no-unused-
 		this.onExit = parse('onExit', this.onExit);
 	};
 
+	Config.prototype.hasHeadlessArg = function () {
+		if (!Array.isArray(this.args)) {
+			return false;
+		}
+
+		for (let i = 0; i < this.args.length; i++) {
+			const arg = this.args[i];
+			if (arg === '--headless') {
+				return true;
+			}
+			if (arg === '--display-driver' && typeof (this.args[i + 1]) === 'string' && this.args[i + 1].toLowerCase() === 'headless') {
+				return true;
+			}
+		}
+
+		return false;
+	};
+
 	/**
 	 * @ignore
 	 * @param {string} loadPath
@@ -331,26 +349,39 @@ const InternalConfig = function (initConfig) { // eslint-disable-line no-unused-
 	 * @param {function()} cleanup
 	 */
 	Config.prototype.getGodotConfig = function (cleanup) {
-		// Try to find a canvas
-		if (!(this.canvas instanceof HTMLCanvasElement)) {
-			const nodes = document.getElementsByTagName('canvas');
-			if (nodes.length && nodes[0] instanceof HTMLCanvasElement) {
-				const first = nodes[0];
-				this.canvas = /** @type {!HTMLCanvasElement} */ (first);
+		const headless = this.hasHeadlessArg();
+		let canvas = this.canvas;
+
+		if (!headless) {
+			// Try to find a canvas.
+			if (!(canvas instanceof HTMLCanvasElement)) {
+				const nodes = document.getElementsByTagName('canvas');
+				if (nodes.length && nodes[0] instanceof HTMLCanvasElement) {
+					const first = nodes[0];
+					canvas = /** @type {!HTMLCanvasElement} */ (first);
+				}
+				if (!canvas) {
+					throw new Error('No canvas found in page');
+				}
 			}
-			if (!this.canvas) {
-				throw new Error('No canvas found in page');
+
+			// Canvas can grab focus on click, or key events won't work.
+			if (canvas.tabIndex < 0) {
+				canvas.tabIndex = 0;
 			}
-		}
-		// Canvas can grab focus on click, or key events won't work.
-		if (this.canvas.tabIndex < 0) {
-			this.canvas.tabIndex = 0;
 		}
 
 		// Browser locale, or custom one if defined.
 		let locale = this.locale;
 		if (!locale) {
-			locale = navigator.languages ? navigator.languages[0] : navigator.language;
+			const nav = typeof navigator !== 'undefined' ? navigator : null;
+			if (nav && Array.isArray(nav.languages) && nav.languages.length > 0) {
+				locale = nav.languages[0];
+			} else if (nav && typeof nav.language === 'string') {
+				locale = nav.language;
+			} else {
+				locale = 'en';
+			}
 			locale = locale.split('.')[0];
 		}
 		locale = locale.replace('-', '_');
@@ -358,13 +389,13 @@ const InternalConfig = function (initConfig) { // eslint-disable-line no-unused-
 
 		// Godot configuration.
 		return {
-			'canvas': this.canvas,
+			'canvas': headless ? null : canvas,
 			'canvasResizePolicy': this.canvasResizePolicy,
 			'locale': locale,
 			'persistentDrops': this.persistentDrops,
 			'virtualKeyboard': this.experimentalVK,
 			'godotPoolSize': this.godotPoolSize,
-			'focusCanvas': this.focusCanvas,
+			'focusCanvas': headless ? false : this.focusCanvas,
 			'onExecute': this.onExecute,
 			'onExit': function (p_code) {
 				cleanup(); // We always need to call the cleanup callback to free memory.

@@ -74,7 +74,7 @@ const GodotConfig = {
 			GodotConfig.godot_pool_size = p_opts['godotPoolSize'];
 			GodotConfig.on_execute = p_opts['onExecute'];
 			GodotConfig.on_exit = p_opts['onExit'];
-			if (p_opts['focusCanvas']) {
+			if (p_opts['focusCanvas'] && GodotConfig.canvas) {
 				GodotConfig.canvas.focus();
 			}
 		},
@@ -96,6 +96,10 @@ const GodotConfig = {
 	godot_js_config_canvas_id_get__proxy: 'sync',
 	godot_js_config_canvas_id_get__sig: 'vii',
 	godot_js_config_canvas_id_get: function (p_ptr, p_ptr_max) {
+		if (!GodotConfig.canvas) {
+			GodotRuntime.stringToHeap('', p_ptr, p_ptr_max);
+			return;
+		}
 		GodotRuntime.stringToHeap(`#${GodotConfig.canvas.id}`, p_ptr, p_ptr_max);
 	},
 

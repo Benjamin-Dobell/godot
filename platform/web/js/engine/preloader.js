@@ -1,4 +1,34 @@
 const Preloader = /** @constructor */ function () { // eslint-disable-line no-unused-vars
+	function getGlobalScope() {
+		if (typeof globalThis !== 'undefined') {
+			return globalThis;
+		}
+		if (typeof window !== 'undefined') {
+			return window;
+		}
+		return null;
+	}
+
+	function scheduleProgress(callback) {
+		const scope = getGlobalScope();
+		if (scope && typeof scope.requestAnimationFrame === 'function') {
+			scope.requestAnimationFrame(callback);
+			return;
+		}
+		if (scope && typeof scope.setTimeout === 'function') {
+			scope.setTimeout(callback, 0);
+		}
+	}
+
+	function scheduleRetry(callback, delay) {
+		const scope = getGlobalScope();
+		if (scope && typeof scope.setTimeout === 'function') {
+			scope.setTimeout(callback, delay);
+		} else {
+			Promise.resolve().then(callback);
+		}
+	}
+
 	function getTrackedResponse(response, load_status) {
 		function onloadprogress(reader, controller) {
 			return reader.read().then(function (result) {
@@ -50,7 +80,7 @@ const Preloader = /** @constructor */ function () { // eslint-disable-line no-un
 				return Promise.reject(err);
 			}
 			return new Promise(function (resolve, reject) {
-				setTimeout(function () {
+				scheduleRetry(function () {
 					retry(func, attempts - 1).then(resolve).catch(reject);
 				}, 1000);
 			});
@@ -90,7 +120,7 @@ const Preloader = /** @constructor */ function () { // eslint-disable-line no-un
 			}
 		}
 		if (!progressIsFinal) {
-			requestAnimationFrame(animateProgress);
+			scheduleProgress(animateProgress);
 		}
 	};
 

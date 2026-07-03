@@ -189,6 +189,9 @@ const GodotDisplayCursor = {
 		visible: true,
 		cursors: {},
 		set_style: function (style) {
+			if (!GodotConfig.canvas) {
+				return;
+			}
 			GodotConfig.canvas.style.cursor = style;
 		},
 		set_shape: function (shape) {
@@ -213,7 +216,7 @@ const GodotDisplayCursor = {
 		},
 		lockPointer: function () {
 			const canvas = GodotConfig.canvas;
-			if (canvas.requestPointerLock) {
+			if (canvas && canvas.requestPointerLock) {
 				canvas.requestPointerLock();
 			}
 		},
@@ -223,7 +226,7 @@ const GodotDisplayCursor = {
 			}
 		},
 		isPointerLocked: function () {
-			return document.pointerLockElement === GodotConfig.canvas;
+			return !!GodotConfig.canvas && document.pointerLockElement === GodotConfig.canvas;
 		},
 	},
 };
@@ -238,6 +241,9 @@ const GodotDisplayScreen = {
 			return GodotDisplayScreen.hidpi ? window.devicePixelRatio || 1 : 1;
 		},
 		isFullscreen: function () {
+			if (!GodotConfig.canvas) {
+				return false;
+			}
 			const elem = document.fullscreenElement || document.mozFullscreenElement
 				|| document.webkitFullscreenElement || document.msFullscreenElement;
 			if (elem) {
@@ -256,6 +262,9 @@ const GodotDisplayScreen = {
 				return 1;
 			}
 			const canvas = GodotConfig.canvas;
+			if (!canvas) {
+				return 1;
+			}
 			try {
 				const promise = (canvas.requestFullscreen || canvas.msRequestFullscreen
 					|| canvas.mozRequestFullScreen || canvas.mozRequestFullscreen
@@ -297,12 +306,15 @@ const GodotDisplayScreen = {
 			}
 		},
 		updateSize: function () {
+			const canvas = GodotConfig.canvas;
+			if (!canvas) {
+				return 0;
+			}
 			const isFullscreen = GodotDisplayScreen.isFullscreen();
 			const wantsFullWindow = GodotConfig.canvas_resize_policy === 2;
 			const noResize = GodotConfig.canvas_resize_policy === 0;
 			const dWidth = GodotDisplayScreen.desired_size[0];
 			const dHeight = GodotDisplayScreen.desired_size[1];
-			const canvas = GodotConfig.canvas;
 			let width = dWidth;
 			let height = dHeight;
 			if (noResize) {
@@ -517,8 +529,9 @@ const GodotDisplay = {
 	godot_js_display_window_size_get__proxy: 'sync',
 	godot_js_display_window_size_get__sig: 'vii',
 	godot_js_display_window_size_get: function (p_width, p_height) {
-		GodotRuntime.setHeapValue(p_width, GodotConfig.canvas.width, 'i32');
-		GodotRuntime.setHeapValue(p_height, GodotConfig.canvas.height, 'i32');
+		const canvas = GodotConfig.canvas;
+		GodotRuntime.setHeapValue(p_width, canvas ? canvas.width : 0, 'i32');
+		GodotRuntime.setHeapValue(p_height, canvas ? canvas.height : 0, 'i32');
 	},
 
 	godot_js_display_has_webgl__proxy: 'sync',
@@ -539,13 +552,15 @@ const GodotDisplay = {
 	godot_js_display_canvas_focus__proxy: 'sync',
 	godot_js_display_canvas_focus__sig: 'v',
 	godot_js_display_canvas_focus: function () {
-		GodotConfig.canvas.focus();
+		if (GodotConfig.canvas) {
+			GodotConfig.canvas.focus();
+		}
 	},
 
 	godot_js_display_canvas_is_focused__proxy: 'sync',
 	godot_js_display_canvas_is_focused__sig: 'i',
 	godot_js_display_canvas_is_focused: function () {
-		return document.activeElement === GodotConfig.canvas;
+		return GodotConfig.canvas ? document.activeElement === GodotConfig.canvas : 0;
 	},
 
 	/*
@@ -703,6 +718,9 @@ const GodotDisplay = {
 	godot_js_display_fullscreen_cb__sig: 'vi',
 	godot_js_display_fullscreen_cb: function (callback) {
 		const canvas = GodotConfig.canvas;
+		if (!canvas) {
+			return;
+		}
 		const func = GodotRuntime.get_func(callback);
 		function change_cb(evt) {
 			if (evt.target === canvas) {
@@ -727,6 +745,9 @@ const GodotDisplay = {
 	godot_js_display_notification_cb__sig: 'viiiii',
 	godot_js_display_notification_cb: function (callback, p_enter, p_exit, p_in, p_out) {
 		const canvas = GodotConfig.canvas;
+		if (!canvas) {
+			return;
+		}
 		const func = GodotRuntime.get_func(callback);
 		const notif = [p_enter, p_exit, p_in, p_out];
 		['mouseover', 'mouseleave', 'focus', 'blur'].forEach(function (evt_name, idx) {
@@ -740,6 +761,9 @@ const GodotDisplay = {
 	godot_js_display_setup_canvas__sig: 'viiii',
 	godot_js_display_setup_canvas: function (p_width, p_height, p_fullscreen, p_hidpi) {
 		const canvas = GodotConfig.canvas;
+		if (!canvas) {
+			return;
+		}
 		GodotEventListeners.add(canvas, 'contextmenu', function (ev) {
 			ev.preventDefault();
 		}, false);
