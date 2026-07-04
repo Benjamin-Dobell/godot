@@ -198,9 +198,9 @@ String OS_Web::get_name() const {
 }
 
 void OS_Web::add_frame_delay(bool p_can_draw, bool p_wake_for_events) {
-#ifndef PROXY_TO_PTHREAD_ENABLED
-	OS::add_frame_delay(p_can_draw, p_wake_for_events);
-#endif
+	// Frame pacing is handled by the Emscripten main-loop scheduler in
+	// web_main.cpp. Blocking here would keep the JS/WASM callback active
+	// instead of yielding back to the host event loop.
 }
 
 void OS_Web::vibrate_handheld(int p_duration_ms, float p_amplitude) {

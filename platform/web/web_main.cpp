@@ -102,23 +102,25 @@ void main_loop_callback() {
 #endif
 	}
 
-#ifndef PROXY_TO_PTHREAD_ENABLED
-	int max_fps = Engine::get_singleton()->get_max_fps();
-	if (max_fps > 0) {
-		if (current_ticks - target_ticks > 1000000) {
-			// When the window loses focus, we stop getting updates and accumulate delay.
-			// For this reason, if the difference is too big, we reset target ticks to the current ticks.
-			target_ticks = current_ticks;
-		}
-		target_ticks += (uint64_t)(1000000 / max_fps);
-	}
-#endif
-
 	if (os->main_loop_iterate()) {
 		emscripten_cancel_main_loop(); // Cancel current loop and set the cleanup one.
 		emscripten_set_main_loop(exit_callback, -1, false);
 		godot_js_os_finish_async(cleanup_after_sync);
 	}
+
+#ifndef PROXY_TO_PTHREAD_ENABLED
+	DisplayServer *display_server = DisplayServer::get_singleton();
+	const uint64_t frame_delay = os->get_frame_delay(display_server ? display_server->window_can_draw() : false);
+	if (frame_delay > 0) {
+		current_ticks = os->get_ticks_usec();
+		if (current_ticks - target_ticks > 1000000) {
+			// When the host pauses callbacks, avoid accumulating stale delay.
+			target_ticks = current_ticks;
+		}
+		target_ticks += frame_delay;
+		target_ticks = MIN(MAX(target_ticks, current_ticks - frame_delay), current_ticks + frame_delay);
+	}
+#endif
 }
 
 void print_web_header() {
