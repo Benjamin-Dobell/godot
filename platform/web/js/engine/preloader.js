@@ -1,29 +1,17 @@
 const Preloader = /** @constructor */ function () { // eslint-disable-line no-unused-vars
-	function getGlobalScope() {
-		if (typeof globalThis !== 'undefined') {
-			return globalThis;
-		}
-		if (typeof window !== 'undefined') {
-			return window;
-		}
-		return null;
-	}
+	let progressScheduler = null;
 
 	function scheduleProgress(callback) {
-		const scope = getGlobalScope();
-		if (scope && typeof scope.requestAnimationFrame === 'function') {
-			scope.requestAnimationFrame(callback);
-			return;
-		}
-		if (scope && typeof scope.setTimeout === 'function') {
-			scope.setTimeout(callback, 0);
+		if (typeof progressScheduler === 'function') {
+			progressScheduler(callback);
+		} else if (typeof globalThis.requestAnimationFrame === 'function') {
+			globalThis.requestAnimationFrame(callback);
 		}
 	}
 
 	function scheduleRetry(callback, delay) {
-		const scope = getGlobalScope();
-		if (scope && typeof scope.setTimeout === 'function') {
-			scope.setTimeout(callback, delay);
+		if (typeof globalThis.setTimeout === 'function') {
+			globalThis.setTimeout(callback, delay);
 		} else {
 			Promise.resolve().then(callback);
 		}
@@ -128,6 +116,10 @@ const Preloader = /** @constructor */ function () { // eslint-disable-line no-un
 
 	this.setProgressFunc = function (callback) {
 		progressFunc = callback;
+	};
+
+	this.setProgressScheduler = function (callback) {
+		progressScheduler = callback;
 	};
 
 	this.loadPromise = function (file, fileSize, raw = false) {

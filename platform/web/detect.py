@@ -61,6 +61,11 @@ def get_opts():
             "Use Emscripten PROXY_TO_PTHREAD option to run the main application code to a separate thread",
             False,
         ),
+        BoolVariable(
+            "nodejs_runtime",
+            "Enable Node.js support in the generated Emscripten runtime. Produces bigger JavaScript glue.",
+            False,
+        ),
         BoolVariable("wasm_simd", "Use WebAssembly SIMD to improve CPU performance", True),
     ]
 
@@ -316,8 +321,12 @@ def configure(env: "SConsEnvironment"):
     if env["wasm_simd"]:
         env.Append(CCFLAGS=["-msimd128"])
 
-    # Reduce code size by generating less support code (e.g. skip NodeJS support).
-    env.Append(LINKFLAGS=["-sENVIRONMENT=web,worker"])
+    # Reduce code size by generating less support code unless Node.js support is explicitly requested.
+    emscripten_environments = "web,worker"
+    if env["nodejs_runtime"]:
+        emscripten_environments += ",node"
+        env.extra_suffix = ".node" + env.extra_suffix
+    env.Append(LINKFLAGS=[f"-sENVIRONMENT={emscripten_environments}"])
 
     # Wrap the JavaScript support code around a closure named Godot.
     env.Append(LINKFLAGS=["-sMODULARIZE=1", "-sEXPORT_NAME='Godot'"])

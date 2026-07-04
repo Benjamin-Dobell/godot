@@ -1539,7 +1539,7 @@ const _GodotAudio = {
 	godot_audio_is_available__sig: 'i',
 	godot_audio_is_available__proxy: 'sync',
 	godot_audio_is_available: function () {
-		if (!(window.AudioContext || window.webkitAudioContext)) {
+		if (typeof window === 'undefined' || !(window.AudioContext || window.webkitAudioContext)) {
 			return 0;
 		}
 		return 1;

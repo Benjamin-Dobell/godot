@@ -78,12 +78,23 @@ const Engine = (function () {
 				if (initPromise) {
 					return initPromise;
 				}
+				preloader.setProgressFunc(this.config.onProgress);
+				preloader.setProgressScheduler(this.config.scheduleProgress);
 				if (loadPromise == null) {
-					if (!basePath) {
-						initPromise = Promise.reject(new Error('A base path must be provided when calling `init` and the engine is not loaded.'));
-						return initPromise;
+					if (this.config.wasmSource) {
+						loadPath = basePath || this.config.executable;
+						loadPromise = this.config.wasmSource;
+					} else {
+						let resolvedBasePath = basePath;
+						if (!resolvedBasePath) {
+							resolvedBasePath = this.config.executable;
+							if (!resolvedBasePath) {
+								initPromise = Promise.reject(new Error('A base path must be provided when calling `init` and the engine is not loaded.'));
+								return initPromise;
+							}
+						}
+						Engine.load(resolvedBasePath, this.config.fileSizes[`${resolvedBasePath}.wasm`]);
 					}
-					Engine.load(basePath, this.config.fileSizes[`${basePath}.wasm`]);
 				}
 				const me = this;
 				function doInit(promise) {
@@ -91,9 +102,8 @@ const Engine = (function () {
 					// This caused a regression with the Mono build (which uses an older emscripten version).
 					// Make sure to test that when refactoring.
 					return new Promise(function (resolve, reject) {
-						promise.then(function (response) {
-							const cloned = new Response(response.clone().body, { 'headers': [['content-type', 'application/wasm']] });
-							Godot(me.config.getModuleConfig(loadPath, cloned)).then(function (module) {
+						promise.then(function (wasmSource) {
+							Godot(me.config.getModuleConfig(loadPath, wasmSource)).then(function (module) {
 								const paths = me.config.persistentPaths;
 								module['initFS'](paths).then(function (err) {
 									me.rtenv = module;
@@ -101,13 +111,12 @@ const Engine = (function () {
 										Engine.unload();
 									}
 									resolve();
-								});
-							});
-						});
+								}).catch(reject);
+							}).catch(reject);
+						}).catch(reject);
 					});
 				}
-				preloader.setProgressFunc(this.config.onProgress);
-				initPromise = doInit(loadPromise);
+				initPromise = doInit(Promise.resolve(loadPromise));
 				return initPromise;
 			},
 
@@ -282,8 +291,4 @@ const Engine = (function () {
 
 	return SafeEngine;
 }());
-if (typeof globalThis !== 'undefined') {
-	globalThis['Engine'] = Engine;
-} else if (typeof window !== 'undefined') {
-	window['Engine'] = Engine;
-}
+globalThis['Engine'] = Engine;

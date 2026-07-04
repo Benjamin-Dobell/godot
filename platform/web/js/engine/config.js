@@ -45,6 +45,15 @@ const InternalConfig = function (initConfig) { // eslint-disable-line no-unused-
 		 */
 		executable: '',
 		/**
+		 * A preloaded WebAssembly source to use instead of fetching the WASM file.
+		 * This may be a ``Response``, ``Promise<Response>``, ``BufferSource``, or ``WebAssembly.Module``.
+		 *
+		 * @memberof EngineConfig
+		 * @default
+		 * @type {(BufferSource | Response | WebAssembly.Module | Promise<(BufferSource | Response | WebAssembly.Module)> | null)}
+		 */
+		wasmSource: null,
+		/**
 		 * An alternative name for the game pck to load. The executable name is used otherwise.
 		 *
 		 * @memberof EngineConfig
@@ -144,6 +153,15 @@ const InternalConfig = function (initConfig) { // eslint-disable-line no-unused-
 		 */
 		godotPoolSize: 4,
 		/**
+		 * A host CommonJS ``require`` function used by embedders that expose exported GodotJS scripts as loose
+		 * CommonJS modules outside the PCK.
+		 *
+		 * @memberof EngineConfig
+		 * @default
+		 * @type {?function(string)}
+		 */
+		godotJSHostRequire: null,
+		/**
 		 * A callback function for handling Godot's ``OS.execute`` calls.
 		 *
 		 * This is for example used in the Web Editor template to switch between project manager and editor, and for running the game.
@@ -173,8 +191,7 @@ const InternalConfig = function (initConfig) { // eslint-disable-line no-unused-
 		/**
 		 * A callback function for displaying download progress.
 		 *
-		 * The function is called once per frame while downloading files, so the usage of ``requestAnimationFrame()``
-		 * is not necessary.
+		 * The function is called once per scheduled progress update while downloading files.
 		 *
 		 * If the callback function receives a total amount of bytes as 0, this means that it is impossible to calculate.
 		 * Possible reasons include:
@@ -192,6 +209,20 @@ const InternalConfig = function (initConfig) { // eslint-disable-line no-unused-
 		 * @type {?function(number, number)}
 		 */
 		onProgress: null,
+		/**
+		 * A callback function for scheduling download progress updates.
+		 *
+		 * By default, ``requestAnimationFrame()`` is used when available. If neither this callback nor
+		 * ``requestAnimationFrame()`` is available, download progress callbacks are not scheduled.
+		 *
+		 * @callback EngineConfig.scheduleProgress
+		 * @param {function()} callback The function to call on the next progress update.
+		 */
+		/**
+		 * @ignore
+		 * @type {?function(function())}
+		 */
+		scheduleProgress: null,
 		/**
 		 * A callback function for handling the standard output stream. This method should usually only be used in debug pages.
 		 *
@@ -255,10 +286,12 @@ const InternalConfig = function (initConfig) { // eslint-disable-line no-unused-
 		this.onPrintError = parse('onPrintError', this.onPrintError);
 		this.onPrint = parse('onPrint', this.onPrint);
 		this.onProgress = parse('onProgress', this.onProgress);
+		this.scheduleProgress = parse('scheduleProgress', this.scheduleProgress);
 
 		// Godot config
 		this.canvas = parse('canvas', this.canvas);
 		this.executable = parse('executable', this.executable);
+		this.wasmSource = parse('wasmSource', this.wasmSource);
 		this.mainPack = parse('mainPack', this.mainPack);
 		this.locale = parse('locale', this.locale);
 		this.canvasResizePolicy = parse('canvasResizePolicy', this.canvasResizePolicy);
@@ -271,12 +304,13 @@ const InternalConfig = function (initConfig) { // eslint-disable-line no-unused-
 		this.fileSizes = parse('fileSizes', this.fileSizes);
 		this.emscriptenPoolSize = parse('emscriptenPoolSize', this.emscriptenPoolSize);
 		this.godotPoolSize = parse('godotPoolSize', this.godotPoolSize);
+		this.godotJSHostRequire = parse('godotJSHostRequire', this.godotJSHostRequire);
 		this.args = parse('args', this.args);
 		this.onExecute = parse('onExecute', this.onExecute);
 		this.onExit = parse('onExit', this.onExit);
 	};
 
-	Config.prototype.hasHeadlessArg = function () {
+	Config.prototype.isHeadless = function () {
 		if (!Array.isArray(this.args)) {
 			return false;
 		}
@@ -286,7 +320,11 @@ const InternalConfig = function (initConfig) { // eslint-disable-line no-unused-
 			if (arg === '--headless') {
 				return true;
 			}
-			if (arg === '--display-driver' && typeof (this.args[i + 1]) === 'string' && this.args[i + 1].toLowerCase() === 'headless') {
+			if (arg !== '--display-driver') {
+				continue;
+			}
+			const nextArg = this.args[i + 1];
+			if (typeof nextArg === 'string' && nextArg.toLowerCase() === 'headless') {
 				return true;
 			}
 		}
@@ -297,10 +335,10 @@ const InternalConfig = function (initConfig) { // eslint-disable-line no-unused-
 	/**
 	 * @ignore
 	 * @param {string} loadPath
-	 * @param {Response} response
+	 * @param {(BufferSource | Response | WebAssembly.Module | Promise<(BufferSource | Response | WebAssembly.Module)>)} wasmSource
 	 */
-	Config.prototype.getModuleConfig = function (loadPath, response) {
-		let r = response;
+	Config.prototype.getModuleConfig = function (loadPath, wasmSource) {
+		let source = wasmSource;
 		const gdext = this.gdextensionLibs;
 		return {
 			'print': this.onPrint,
@@ -309,18 +347,30 @@ const InternalConfig = function (initConfig) { // eslint-disable-line no-unused-
 			'noExitRuntime': false,
 			'dynamicLibraries': [`${loadPath}.side.wasm`].concat(this.gdextensionLibs),
 			'emscriptenPoolSize': this.emscriptenPoolSize,
+			'__godotjs_host_require': this.godotJSHostRequire,
 			'instantiateWasm': function (imports, onSuccess) {
-				function done(result) {
-					onSuccess(result['instance'], result['module']);
-				}
-				if (typeof (WebAssembly.instantiateStreaming) !== 'undefined') {
-					WebAssembly.instantiateStreaming(Promise.resolve(r), imports).then(done);
-				} else {
-					r.arrayBuffer().then(function (buffer) {
-						WebAssembly.instantiate(buffer, imports).then(done);
-					});
-				}
-				r = null;
+				Promise.resolve(source).then(function (resolvedSource) {
+					if (resolvedSource instanceof WebAssembly.Module) {
+						WebAssembly.instantiate(resolvedSource, imports).then(function (instance) {
+							onSuccess(instance, resolvedSource);
+						});
+						return;
+					}
+					function done(result) {
+						onSuccess(result['instance'], result['module']);
+					}
+					if (resolvedSource instanceof ArrayBuffer || ArrayBuffer.isView(resolvedSource)) {
+						WebAssembly.instantiate(resolvedSource, imports).then(done);
+					} else if (typeof WebAssembly.instantiateStreaming !== 'undefined') {
+						WebAssembly.instantiateStreaming(resolvedSource, imports).then(done);
+					} else {
+						resolvedSource.arrayBuffer().then(function (buffer) {
+							WebAssembly.instantiate(buffer, imports).then(done);
+						});
+					}
+				}).finally(function () {
+					source = null;
+				});
 				return {};
 			},
 			'locateFile': function (path) {
@@ -349,10 +399,11 @@ const InternalConfig = function (initConfig) { // eslint-disable-line no-unused-
 	 * @param {function()} cleanup
 	 */
 	Config.prototype.getGodotConfig = function (cleanup) {
-		const headless = this.hasHeadlessArg();
-		let canvas = this.canvas;
+		let canvas = /** @type {?HTMLCanvasElement} */ (null);
 
-		if (!headless) {
+		if (!this.isHeadless()) {
+			canvas = this.canvas;
+
 			// Try to find a canvas.
 			if (!(canvas instanceof HTMLCanvasElement)) {
 				const nodes = document.getElementsByTagName('canvas');
@@ -389,13 +440,13 @@ const InternalConfig = function (initConfig) { // eslint-disable-line no-unused-
 
 		// Godot configuration.
 		return {
-			'canvas': headless ? null : canvas,
+			'canvas': canvas,
 			'canvasResizePolicy': this.canvasResizePolicy,
 			'locale': locale,
 			'persistentDrops': this.persistentDrops,
 			'virtualKeyboard': this.experimentalVK,
 			'godotPoolSize': this.godotPoolSize,
-			'focusCanvas': headless ? false : this.focusCanvas,
+			'focusCanvas': canvas ? this.focusCanvas : false,
 			'onExecute': this.onExecute,
 			'onExit': function (p_code) {
 				cleanup(); // We always need to call the cleanup callback to free memory.
