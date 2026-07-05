@@ -126,9 +126,9 @@ bool CameraFeedWeb::activate_feed() {
 	CameraDriverWeb *driver = CameraDriverWeb::get_singleton();
 	ERR_FAIL_NULL_V_MSG(driver, false, "CameraDriverWeb singleton is not initialized.");
 
-	// 'this' is passed as a raw context pointer to JS. This is safe because
-	// Web builds are single-threaded - stop_stream() synchronously cancels all
-	// pending callbacks, so no callback can fire after deactivate_feed() returns.
+	// 'this' is passed as a raw context pointer to JS. Web builds are single-threaded,
+	// and the JS bridge guards pending async startup continuations so a stopped feed
+	// cannot resume after `deactivate_feed()` tears its session down.
 	driver->get_pixel_data(this, device_id, width, height,
 			&_on_get_pixel_data, &_on_denied_callback);
 	return true;

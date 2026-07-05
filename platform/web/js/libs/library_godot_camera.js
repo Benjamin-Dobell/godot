@@ -49,6 +49,8 @@
  *   useWebCodecsWorker: boolean
  *   useWebCodecs: boolean
  *   useWorker: boolean
+ *   workerFrameInFlight: boolean
+ *   startGeneration: number
  * }} CameraResource
  */
 
@@ -168,7 +170,7 @@ const GodotCamera = {
 					width: visibleRect.width,
 					height: visibleRect.height,
 				};
-			}
+			};
 
 			return {
 				x: 0,
@@ -581,6 +583,136 @@ self.onmessage = async function(event) {
 		},
 
 		/**
+		 * Returns true when the pending startup work still belongs to the active camera entry.
+		 * Prevents async `getUserMedia()` / `play()` continuations from reviving a camera after `stop()`.
+		 * @param {Map<string, CameraResource>} cameras Active camera map
+		 * @param {string} cameraId Camera identifier
+		 * @param {CameraResource} camera Camera resource captured by the startup coroutine
+		 * @param {number} startGeneration Monotonic startup token
+		 * @returns {boolean}
+		 */
+		isCurrentCameraStart: function (cameras, cameraId, camera, startGeneration) {
+			const currentCamera = cameras.get(cameraId);
+			return currentCamera === camera && currentCamera.startGeneration === startGeneration;
+		},
+
+		/**
+		 * Cleans up local startup resources that never became, or no longer are, the active camera session.
+		 * @param {{
+		 *   video?: HTMLVideoElement|null,
+		 *   stream?: MediaStream|null,
+		 *   permissionStatus?: PermissionStatus|null,
+		 *   permissionListener?: Function|null
+		 * }} resources
+		 * @returns {void}
+		 */
+		releasePendingCameraStart: function (resources) {
+			const video = resources.video || null;
+			const stream = resources.stream || null;
+			const permissionStatus = resources.permissionStatus || null;
+			const permissionListener = resources.permissionListener || null;
+
+			if (permissionListener && permissionStatus) {
+				permissionStatus.removeEventListener('change', permissionListener);
+			}
+
+			if (stream) {
+				stream.getTracks().forEach((track) => track.stop());
+			}
+
+			if (video && video.parentNode) {
+				video.parentNode.removeChild(video);
+			}
+		},
+
+		/**
+		 * Commits async startup resources to the active camera entry after its generation was checked.
+		 * @param {CameraResource} camera Camera resource
+		 * @param {{
+		 *   video?: HTMLVideoElement|null,
+		 *   stream?: MediaStream|null,
+		 *   permissionStatus?: PermissionStatus|null,
+		 *   permissionListener?: Function|null
+		 * }} resources
+		 * @returns {void}
+		 */
+		commitCameraStartResources: function (camera, resources) {
+			if (resources.video) {
+				camera.video = resources.video;
+			}
+			if (resources.stream) {
+				camera.stream = resources.stream;
+			}
+			if (resources.permissionStatus && resources.permissionListener) {
+				camera.permissionStatus = resources.permissionStatus;
+				camera.permissionListener = resources.permissionListener;
+			}
+		},
+
+		/**
+		 * Queries camera permission state when supported and returns a listener to clean up later.
+		 * @param {string} cameraId Camera identifier
+		 * @param {number} context Context value to pass to callback
+		 * @param {Function} deniedCallback Callback for permission denied
+		 * @returns {Promise<{permissionStatus: PermissionStatus|null, permissionListener: Function|null}>}
+		 */
+		queryCameraPermission: async function (cameraId, context, deniedCallback) {
+			if (!navigator.permissions || !navigator.permissions.query) {
+				return { permissionStatus: null, permissionListener: null };
+			}
+
+			try {
+				const permissionStatus = await navigator.permissions.query({ name: 'camera' });
+				const permissionListener = () => {
+					if (permissionStatus.state !== 'denied') {
+						return;
+					}
+					GodotRuntime.print('Camera permission denied, stopping stream');
+					permissionStatus.removeEventListener('change', permissionListener);
+					GodotCamera.api.stop(cameraId);
+					deniedCallback(context);
+				};
+				permissionStatus.addEventListener('change', permissionListener);
+				return { permissionStatus, permissionListener };
+			} catch (e) {
+				// Some browsers don't support 'camera' permission query.
+				// This is not critical - we can still use the camera.
+				return { permissionStatus: null, permissionListener: null };
+			}
+		},
+
+		/**
+		 * Starts the best available capture path for an initialized camera stream.
+		 * @param {CameraResource} camera Camera resource
+		 * @param {string} cameraId Camera identifier
+		 * @param {Function} callback Callback function for frame data
+		 * @param {number} context Context value to pass to callback
+		 * @param {Function} deniedCallback Callback for permission denied
+		 * @returns {void}
+		 */
+		startCameraCapture: function (camera, cameraId, callback, context, deniedCallback) {
+			camera.facingMode = GodotCamera.getFacingMode(camera.stream);
+
+			// Choose capture method (ordered by efficiency):
+			// 1. WebCodecs + Worker: VideoFrame transferred to Worker, copyTo() in Worker
+			// 2. Worker Canvas 2D: ImageBitmap transferred to Worker, drawImage + getImageData in Worker
+			// 3. WebCodecs (main thread): copyTo() on main thread
+			// 4. Canvas 2D (main thread): drawImage + getImageData on main thread
+			if (GodotCamera.isWebCodecsSupported() && GodotCamera.isWorkerSupported()) {
+				camera.useWebCodecsWorker = true;
+				GodotCamera.setupWebCodecsWorkerCapture(camera, cameraId, callback, context, deniedCallback);
+			} else if (GodotCamera.isWorkerSupported()) {
+				camera.useWorker = true;
+				GodotCamera.setupCanvas2DWorkerCapture(camera, cameraId, callback, context, deniedCallback);
+			} else if (GodotCamera.isWebCodecsSupported()) {
+				camera.useWebCodecs = true;
+				GodotCamera.setupWebCodecsCapture(camera, cameraId, callback, context, deniedCallback);
+			} else {
+				GodotCamera.setupCanvas2DCapture(camera, cameraId, callback, context, deniedCallback);
+			}
+		},
+
+		/**
 		 * Sets up WebCodecs-based frame capture using MediaStreamTrackProcessor.
 		 * @param {CameraResource} camera Camera resource
 		 * @param {string} cameraId Camera identifier
@@ -697,6 +829,7 @@ self.onmessage = async function(event) {
 			const [videoTrack] = camera.stream.getVideoTracks();
 			camera.trackProcessor = new MediaStreamTrackProcessor({ track: videoTrack });
 			camera.frameReader = camera.trackProcessor.readable.getReader();
+			camera.workerFrameInFlight = false;
 
 			// Handle messages from worker
 			camera.worker.onmessage = (event) => {
@@ -704,11 +837,16 @@ self.onmessage = async function(event) {
 
 				switch (type) {
 				case 'frameData':
-					GodotCamera.handleWorkerFrameData(event.data, callback, context, camera.worker);
+					try {
+						GodotCamera.handleWorkerFrameData(event.data, callback, context, camera.worker);
+					} finally {
+						camera.workerFrameInFlight = false;
+					}
 					break;
 
 				case 'error':
 					GodotRuntime.print('Worker error:', event.data.message);
+					camera.workerFrameInFlight = false;
 					// Fall back to Worker Canvas 2D on error
 					camera.useWebCodecsWorker = false;
 					if (camera.frameReader) {
@@ -728,6 +866,7 @@ self.onmessage = async function(event) {
 
 			camera.worker.onerror = (error) => {
 				GodotRuntime.print('Worker error event:', error.message);
+				camera.workerFrameInFlight = false;
 				camera.useWebCodecsWorker = false;
 				if (camera.frameReader) {
 					camera.frameReader.cancel().catch(() => {});
@@ -765,22 +904,35 @@ self.onmessage = async function(event) {
 							break;
 						}
 
+						if (currentCamera.workerFrameInFlight) {
+							videoFrame.close();
+							continue;
+						}
+						currentCamera.workerFrameInFlight = true;
+
 						// Transfer VideoFrame to worker
-						currentCamera.worker.postMessage(
-							{
-								type: 'videoFrame',
-								data: {
-									videoFrame,
-									facingMode: currentCamera.facingMode,
+						try {
+							currentCamera.worker.postMessage(
+								{
+									type: 'videoFrame',
+									data: {
+										videoFrame,
+										facingMode: currentCamera.facingMode,
+									},
 								},
-							},
-							[videoFrame]
-						);
+								[videoFrame]
+							);
+						} catch (postMessageError) {
+							currentCamera.workerFrameInFlight = false;
+							videoFrame.close();
+							throw postMessageError;
+						}
 					}
 				} catch (error) {
 					GodotRuntime.print('WebCodecs Worker error, falling back:', error.message);
 					const currentCamera = cameras.get(cameraId);
 					if (currentCamera && currentCamera.useWebCodecsWorker) {
+						currentCamera.workerFrameInFlight = false;
 						currentCamera.useWebCodecsWorker = false;
 						if (currentCamera.frameReader) {
 							currentCamera.frameReader.cancel().catch(() => {});
@@ -920,6 +1072,7 @@ self.onmessage = async function(event) {
 				this.setupCanvas2DCapture(camera, cameraId, callback, context, deniedCallback);
 				return;
 			}
+			camera.workerFrameInFlight = false;
 
 			// Handle messages from worker.
 			camera.worker.onmessage = (event) => {
@@ -927,11 +1080,16 @@ self.onmessage = async function(event) {
 
 				switch (type) {
 				case 'frameData':
-					GodotCamera.handleWorkerFrameData(event.data, callback, context, camera.worker);
+					try {
+						GodotCamera.handleWorkerFrameData(event.data, callback, context, camera.worker);
+					} finally {
+						camera.workerFrameInFlight = false;
+					}
 					break;
 
 				case 'error':
 					GodotRuntime.print('Worker error:', event.data.message);
+					camera.workerFrameInFlight = false;
 					// Fall back to main thread on error.
 					camera.useWorker = false;
 					if (camera.worker) {
@@ -948,6 +1106,7 @@ self.onmessage = async function(event) {
 
 			camera.worker.onerror = (error) => {
 				GodotRuntime.print('Worker error event:', error.message);
+				camera.workerFrameInFlight = false;
 				camera.useWorker = false;
 				if (camera.worker) {
 					camera.worker.terminate();
@@ -979,37 +1138,54 @@ self.onmessage = async function(event) {
 				}
 
 				if (video.readyState === video.HAVE_ENOUGH_DATA) {
-					try {
-						// Create ImageBitmap from video (can be transferred to worker).
-						createImageBitmap(video).then((imageBitmap) => {
-							const cam = cameras.get(cameraId);
-							if (!cam || !cam.useWorker || !cam.worker) {
-								imageBitmap.close();
-								return;
+					if (!currentCamera.workerFrameInFlight) {
+						currentCamera.workerFrameInFlight = true;
+						try {
+							// Create ImageBitmap from video (can be transferred to worker).
+							createImageBitmap(video).then((imageBitmap) => {
+								const cam = cameras.get(cameraId);
+								if (!cam || !cam.useWorker || !cam.worker) {
+									if (cam) {
+										cam.workerFrameInFlight = false;
+									}
+									imageBitmap.close();
+									return;
+								}
+
+								try {
+									cam.worker.postMessage(
+										{
+											type: 'frame',
+											data: {
+												imageBitmap,
+												facingMode: cam.facingMode,
+											},
+										},
+										[imageBitmap]
+									);
+								} catch (postMessageError) {
+									cam.workerFrameInFlight = false;
+									imageBitmap.close();
+									GodotRuntime.print('Failed to post ImageBitmap to worker:', postMessageError.message || postMessageError);
+								}
+							}).catch((e) => {
+								const cam = cameras.get(cameraId);
+								if (cam) {
+									cam.workerFrameInFlight = false;
+								}
+								GodotRuntime.print('createImageBitmap error:', e.message);
+							});
+						} catch (error) {
+							currentCamera.workerFrameInFlight = false;
+							GodotCamera.sendGetPixelDataCallback(callback, context, 0, 0, 0, 0, 0, error.message);
+
+							if (error.name === 'SecurityError' || error.name === 'NotAllowedError') {
+								GodotRuntime.print('Security error, stopping stream:', error);
+								GodotCamera.api.stop(cameraId);
+								deniedCallback(context);
 							}
-
-							cam.worker.postMessage(
-								{
-									type: 'frame',
-									data: {
-										imageBitmap,
-										facingMode: cam.facingMode,
-									},
-								},
-								[imageBitmap]
-							);
-						}).catch((e) => {
-							GodotRuntime.print('createImageBitmap error:', e.message);
-						});
-					} catch (error) {
-						GodotCamera.sendGetPixelDataCallback(callback, context, 0, 0, 0, 0, 0, error.message);
-
-						if (error.name === 'SecurityError' || error.name === 'NotAllowedError') {
-							GodotRuntime.print('Security error, stopping stream:', error);
-							GodotCamera.api.stop(cameraId);
-							deniedCallback(context);
+							return;
 						}
-						return;
 					}
 				}
 
@@ -1025,6 +1201,7 @@ self.onmessage = async function(event) {
 		 * @returns {void}
 		 */
 		cleanupCamera: function (camera) {
+			camera.workerFrameInFlight = false;
 			// Clean up Web Worker resources.
 			if (camera.worker) {
 				camera.worker.postMessage({ type: 'stop' });
@@ -1156,18 +1333,24 @@ self.onmessage = async function(event) {
 							useWebCodecsWorker: false,
 							useWebCodecs: false,
 							useWorker: false,
+							workerFrameInFlight: false,
 							facingMode: 0,
+							startGeneration: 0,
 						};
 						cameras.set(cameraId, camera);
 					}
 
 					if (!camera.stream) {
+						camera.startGeneration += 1;
+						const startGeneration = camera.startGeneration;
+						const isCurrentStart = () => GodotCamera.isCurrentCameraStart(cameras, cameraId, camera, startGeneration);
+
 						// Create video element (needed for Canvas 2D fallback).
-						camera.video = document.createElement('video');
-						camera.video.style.display = 'none';
-						camera.video.autoplay = true;
-						camera.video.playsInline = true;
-						document.body.appendChild(camera.video);
+						const video = document.createElement('video');
+						video.style.display = 'none';
+						video.autoplay = true;
+						video.playsInline = true;
+						document.body.appendChild(video);
 
 						const constraints = {
 							video: {
@@ -1176,59 +1359,43 @@ self.onmessage = async function(event) {
 								height: { ideal: height },
 							},
 						};
-						// eslint-disable-next-line require-atomic-updates
-						camera.stream = await navigator.mediaDevices.getUserMedia(constraints);
+						const stream = await navigator.mediaDevices.getUserMedia(constraints);
+						if (!isCurrentStart()) {
+							GodotCamera.releasePendingCameraStart({ video, stream });
+							return;
+						}
 
-						const [videoTrack] = camera.stream.getVideoTracks();
+						GodotCamera.commitCameraStartResources(camera, { video, stream });
+
+						const [videoTrack] = stream.getVideoTracks();
 						videoTrack.addEventListener('ended', () => {
+							if (!isCurrentStart()) {
+								return;
+							}
 							GodotCamera.api.stop(cameraId);
 						});
 
-						if (navigator.permissions && navigator.permissions.query) {
-							try {
-								const permissionStatus = await navigator.permissions.query({ name: 'camera' });
-								// eslint-disable-next-line require-atomic-updates
-								camera.permissionStatus = permissionStatus;
-								camera.permissionListener = () => {
-									if (permissionStatus.state === 'denied') {
-										GodotRuntime.print('Camera permission denied, stopping stream');
-										if (camera.permissionListener) {
-											permissionStatus.removeEventListener('change', camera.permissionListener);
-										}
-										GodotCamera.api.stop(cameraId);
-										deniedCallback(context);
-									}
-								};
-								permissionStatus.addEventListener('change', camera.permissionListener);
-							} catch (e) {
-								// Some browsers don't support 'camera' permission query.
-								// This is not critical - we can still use the camera.
-							}
+						let permissionStatus = null;
+						let permissionListener = null;
+						const permission = await GodotCamera.queryCameraPermission(cameraId, context, deniedCallback);
+						permissionStatus = permission.permissionStatus;
+						permissionListener = permission.permissionListener;
+						if (!isCurrentStart()) {
+							GodotCamera.releasePendingCameraStart({ video, stream, permissionStatus, permissionListener });
+							return;
+						}
+						if (permissionStatus && permissionListener) {
+							GodotCamera.commitCameraStartResources(camera, { permissionStatus, permissionListener });
 						}
 
-						camera.video.srcObject = camera.stream;
-						await camera.video.play();
-
-						// Cache facing mode once (doesn't change during stream).
-						camera.facingMode = GodotCamera.getFacingMode(camera.stream);
-
-						// Choose capture method (ordered by efficiency):
-						// 1. WebCodecs + Worker: VideoFrame transferred to Worker, copyTo() in Worker
-						// 2. Worker Canvas 2D: ImageBitmap transferred to Worker, drawImage + getImageData in Worker
-						// 3. WebCodecs (main thread): copyTo() on main thread
-						// 4. Canvas 2D (main thread): drawImage + getImageData on main thread
-						if (GodotCamera.isWebCodecsSupported() && GodotCamera.isWorkerSupported()) {
-							camera.useWebCodecsWorker = true;
-							GodotCamera.setupWebCodecsWorkerCapture(camera, cameraId, callback, context, deniedCallback);
-						} else if (GodotCamera.isWorkerSupported()) {
-							camera.useWorker = true;
-							GodotCamera.setupCanvas2DWorkerCapture(camera, cameraId, callback, context, deniedCallback);
-						} else if (GodotCamera.isWebCodecsSupported()) {
-							camera.useWebCodecs = true;
-							GodotCamera.setupWebCodecsCapture(camera, cameraId, callback, context, deniedCallback);
-						} else {
-							GodotCamera.setupCanvas2DCapture(camera, cameraId, callback, context, deniedCallback);
+						video.srcObject = stream;
+						await video.play();
+						if (!isCurrentStart()) {
+							GodotCamera.releasePendingCameraStart({ video, stream, permissionStatus, permissionListener });
+							return;
 						}
+
+						GodotCamera.startCameraCapture(camera, cameraId, callback, context, deniedCallback);
 					}
 				} catch (error) {
 					GodotCamera.sendGetPixelDataCallback(callback, context, 0, 0, 0, 0, 0, error.message);
