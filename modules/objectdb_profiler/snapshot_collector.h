@@ -31,8 +31,14 @@
 #pragma once
 
 #include "core/variant/dictionary.h"
-#include "scene/debugger/scene_debugger_object.h"
 
+class Object;
+
+#ifdef DEBUG_ENABLED
+#include "scene/debugger/scene_debugger_object.h"
+#endif
+
+#ifdef DEBUG_ENABLED
 struct SnapshotDataTransportObject : public SceneDebuggerObject {
 	SnapshotDataTransportObject() {}
 	SnapshotDataTransportObject(Object *p_obj) :
@@ -40,6 +46,7 @@ struct SnapshotDataTransportObject : public SceneDebuggerObject {
 
 	Dictionary extra_debug_data;
 };
+#endif
 
 class SnapshotCollector {
 	inline static HashMap<int, Vector<uint8_t>> pending_snapshots;
