@@ -342,7 +342,12 @@ void DocTools::merge_from(const DocTools &p_data) {
 }
 
 void DocTools::add_doc(const DocData::ClassDoc &p_class_doc) {
-	ERR_FAIL_COND(p_class_doc.name.is_empty());
+	ERR_FAIL_COND_MSG(
+			p_class_doc.name.is_empty(),
+			vformat("Empty class doc name. script_path='%s' inherits='%s' is_script_doc=%s",
+					p_class_doc.script_path,
+					p_class_doc.inherits,
+					p_class_doc.is_script_doc ? "true" : "false"));
 	class_list[p_class_doc.name] = p_class_doc;
 	inheriting[p_class_doc.inherits].insert(p_class_doc.name);
 }
