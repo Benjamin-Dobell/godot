@@ -1349,7 +1349,9 @@ self.onmessage = async function(event) {
 						const video = document.createElement('video');
 						video.style.display = 'none';
 						video.autoplay = true;
-						video.playsInline = true;
+						// Keep the DOM property quoted so Closure does not rename it. iOS Safari
+						// requires playsInline for continuous hidden getUserMedia video frames.
+						video['playsInline'] = true;
 						document.body.appendChild(video);
 
 						const constraints = {
