@@ -148,9 +148,9 @@ const GodotCamera = {
 					&& res.height >= (heightRange.min || 1)
 					&& res.height <= (heightRange.max || 9999))
 				.map((res) => ({
-					width: res.width,
-					height: res.height,
-					frameRate: maxFrameRate,
+					'width': res.width,
+					'height': res.height,
+					'frameRate': maxFrameRate,
 				}));
 		},
 
@@ -1262,7 +1262,9 @@ self.onmessage = async function(event) {
 			 */
 			getCameras: async function (context, callbackPtr1, callbackPtr2) {
 				const callback = GodotRuntime.get_func(callbackPtr2);
-				const result = { error: null, cameras: null };
+				// These keys cross the JavaScript/C++ boundary as JSON and must remain
+				// stable when Closure's advanced property renaming is enabled.
+				const result = { 'error': null, 'cameras': null };
 
 				try {
 					// Request camera access permission first.
@@ -1276,7 +1278,7 @@ self.onmessage = async function(event) {
 					// Use InputDeviceInfo.getCapabilities() when available (Chrome/Edge 109+)
 					// to avoid opening a stream per device (which causes LED flicker and is slow).
 					// Fall back to default capabilities on browsers without support (Firefox, Safari).
-					result.cameras = videoDevices.map((device, index) => {
+					result['cameras'] = videoDevices.map((device, index) => {
 						let formats;
 						if (typeof device.getCapabilities === 'function') {
 							const capabilities = device.getCapabilities();
@@ -1286,14 +1288,14 @@ self.onmessage = async function(event) {
 						}
 
 						return {
-							index,
-							id: device.deviceId,
-							label: device.label || `Camera ${index}`,
-							formats,
+							'index': index,
+							'id': device.deviceId,
+							'label': device.label || `Camera ${index}`,
+							'formats': formats,
 						};
 					});
 				} catch (error) {
-					result.error = error.message;
+					result['error'] = error.message;
 				}
 
 				GodotCamera.sendCamerasCallbackResult(callback, callbackPtr1, context, result);
