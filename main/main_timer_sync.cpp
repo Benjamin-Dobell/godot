@@ -30,15 +30,19 @@
 
 #include "main_timer_sync.h"
 
+#include "core/config/project_settings.h"
 #include "core/os/os.h"
+#include "core/string/print_string.h"
+#include "core/string/ustring.h"
 #include "servers/display/display_server.h"
+
+// Minimum interval between the diagnostic state dumps emitted by
+// MainTimerSync::trace_state(). One second keeps the log readable while still
+// resolving the frame-to-frame progression of a developing latch.
+constexpr uint64_t TraceIntervalUsec = 1000000;
 
 // Uncomment this define to get more debugging logs for the delta smoothing.
 // #define GODOT_DEBUG_DELTA_SMOOTHER
-#ifdef GODOT_DEBUG_DELTA_SMOOTHER
-#include "core/string/print_string.h"
-#include "core/string/string.h"
-#endif
 
 void MainFrameTime::clamp_process_step(double min_process_step, double max_process_step) {
 	if (process_step < min_process_step) {
@@ -494,8 +498,18 @@ MainFrameTime MainTimerSync::advance_checked(double p_physics_step, int p_physic
 	}
 #endif
 
-	// track deficit
-	time_deficit = p_process_step - ret.process_step;
+	// The invariant asserted immediately above (0 <= time_accum <= p_physics_step) was only ever
+	// checked under DEBUG_ENABLED, so release builds had nothing to stop a violated accumulator
+	// carrying forward into the following frame and persisting indefinitely. Enforce it in every
+	// build so an excursion costs a single frame instead of latching. In healthy operation the
+	// value is already in range and this is a no-op.
+	time_accum = CLAMP(time_accum, 0.0, p_physics_step);
+
+	// Track deficit. This function's contract is that the deficit sum stays close to zero, so bound
+	// it to one physics tick: without a bound, a single pathological frame can hand an arbitrarily
+	// large carry-over to the next call, which is re-added to p_process_step at the top of
+	// advance_checked and inflates every subsequent step.
+	time_deficit = CLAMP(p_process_step - ret.process_step, -p_physics_step, p_physics_step);
 
 	// p_physics_step is 1.0 / iterations_per_sec
 	// i.e. the time in seconds taken by a physics tick
@@ -509,9 +523,61 @@ double MainTimerSync::get_cpu_process_step() {
 	uint64_t cpu_ticks_elapsed = current_cpu_ticks_usec - last_cpu_ticks_usec;
 	last_cpu_ticks_usec = current_cpu_ticks_usec;
 
+	trace_raw_cpu_step = cpu_ticks_elapsed / 1000000.0;
+
 	cpu_ticks_elapsed = _delta_smoother.smooth_delta(cpu_ticks_elapsed);
 
+	trace_smoothed_cpu_step = cpu_ticks_elapsed / 1000000.0;
+
 	return cpu_ticks_elapsed / 1000000.0;
+}
+
+// Diagnostics only. Dumps the internal timing state at most once per
+// TraceIntervalUsec, gated on the `debug/settings/main_timer_sync_trace` project
+// setting so it can be enabled at runtime on an already-running build.
+void MainTimerSync::trace_state(const MainFrameTime &p_frame_time, double p_physics_step, int p_physics_ticks_per_second) {
+	const uint64_t now_usec = OS::get_singleton()->get_ticks_usec();
+	if (now_usec - trace_last_log_usec < TraceIntervalUsec) {
+		return;
+	}
+	trace_last_log_usec = now_usec;
+
+	const bool trace_enabled = GLOBAL_GET("debug/settings/main_timer_sync_trace");
+	if (!trace_enabled) {
+		return;
+	}
+
+	String typical;
+	String accumulated;
+	for (int i = 0; i < CONTROL_STEPS; ++i) {
+		if (i > 0) {
+			typical += ",";
+			accumulated += ",";
+		}
+		typical += itos(typical_physics_steps[i]);
+		accumulated += itos(accumulated_physics_steps[i]);
+	}
+
+	print_line(vformat(
+			"[MainTimerSync] raw_step=%.6f smoothed_step=%.6f process_step=%.6f physics_steps=%d "
+			"time_accum=%.6f time_deficit=%.6f physics_step=%.6f ticks_per_second=%d fixed_fps=%d "
+			"estimated_fps=%d vsync_delta=%d leftover_time=%d smoothing_allowed=%d "
+			"typical=[%s] accumulated=[%s]",
+			trace_raw_cpu_step,
+			trace_smoothed_cpu_step,
+			p_frame_time.process_step,
+			p_frame_time.physics_steps,
+			time_accum,
+			time_deficit,
+			p_physics_step,
+			p_physics_ticks_per_second,
+			fixed_fps,
+			_delta_smoother.get_estimated_fps(),
+			_delta_smoother.get_vsync_delta(),
+			_delta_smoother.get_leftover_time(),
+			_delta_smoother.is_smoothing_allowed() ? 1 : 0,
+			typical,
+			accumulated));
 }
 
 MainTimerSync::MainTimerSync() {
@@ -539,5 +605,9 @@ void MainTimerSync::set_fixed_fps(int p_fixed_fps) {
 MainFrameTime MainTimerSync::advance(double p_physics_step, int p_physics_ticks_per_second) {
 	double cpu_process_step = get_cpu_process_step();
 
-	return advance_checked(p_physics_step, p_physics_ticks_per_second, cpu_process_step);
+	MainFrameTime ret = advance_checked(p_physics_step, p_physics_ticks_per_second, cpu_process_step);
+
+	trace_state(ret, p_physics_step, p_physics_ticks_per_second);
+
+	return ret;
 }

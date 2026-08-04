@@ -46,6 +46,13 @@ class MainTimerSync {
 		// pass the recorded delta, returns a smoothed delta
 		int64_t smooth_delta(int64_t p_delta);
 
+		// Diagnostics only. Exposes the estimator state so MainTimerSync::trace_state()
+		// can report it; nothing here affects smoothing behavior.
+		int32_t get_estimated_fps() const { return _estimated_fps; }
+		int64_t get_vsync_delta() const { return _vsync_delta; }
+		int64_t get_leftover_time() const { return _leftover_time; }
+		bool is_smoothing_allowed() const { return _measurement_allows_smoothing; }
+
 	private:
 		void made_new_estimate();
 		void update_refresh_rate_estimator(int64_t p_delta);
@@ -111,6 +118,12 @@ class MainTimerSync {
 
 	int fixed_fps = 0;
 
+	// Diagnostics only. Wall clock step recorded either side of delta smoothing, plus
+	// the throttle for the periodic state dump. See trace_state().
+	double trace_raw_cpu_step = 0;
+	double trace_smoothed_cpu_step = 0;
+	uint64_t trace_last_log_usec = 0;
+
 protected:
 	// returns the fraction of p_physics_step required for the timer to overshoot
 	// before advance_core considers changing the physics_steps return from
@@ -129,6 +142,10 @@ protected:
 
 	// determine wall clock step since last iteration
 	double get_cpu_process_step();
+
+	// Diagnostics only. Periodically prints the internal accumulator state so a runaway
+	// time_accum / typical_physics_steps latch can be identified from a running build.
+	void trace_state(const MainFrameTime &p_frame_time, double p_physics_step, int p_physics_ticks_per_second);
 
 public:
 	MainTimerSync();

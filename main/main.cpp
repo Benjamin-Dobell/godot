@@ -2269,6 +2269,9 @@ Error Main::setup(const char *execpath, int argc, char *argv[], bool p_second_ph
 		OS::get_singleton()->set_delta_smoothing(GLOBAL_GET("application/run/delta_smoothing"));
 	}
 
+	// Diagnostics only. Periodically dumps MainTimerSync's internal accumulator state.
+	GLOBAL_DEF("debug/settings/main_timer_sync_trace", false);
+
 	GLOBAL_DEF("debug/settings/stdout/print_fps", false);
 	GLOBAL_DEF("debug/settings/stdout/print_gpu_profile", false);
 	GLOBAL_DEF("debug/settings/stdout/verbose_stdout", false);
@@ -4956,6 +4959,14 @@ bool Main::iteration() {
 	if (fixed_fps == -1 && advance.physics_steps > max_physics_steps) {
 		process_step -= (advance.physics_steps - max_physics_steps) * physics_step;
 		advance.physics_steps = max_physics_steps;
+
+		// `scaled_step` is what reaches RenderingServer::draw(), and it was computed from the
+		// pre-clamp `process_step`. Leaving it stale hands the rasterizer a larger delta than the
+		// engine actually simulated, so shader TIME and particles race ahead of process/physics
+		// exactly when the engine is already struggling. Recompute it from the clamped value.
+		// This restores the intent of 35eb7f2d6a ("Rasterizers are now in sync with engine"),
+		// which introduced `scaled_step` but hoisted its computation above this clamp.
+		scaled_step = process_step * time_scale;
 	}
 
 	bool exit = false;
