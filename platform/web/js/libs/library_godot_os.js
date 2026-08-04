@@ -124,6 +124,7 @@ const GodotFS = {
 		ENOENT: 44,
 		_idbfs: false,
 		_syncing: false,
+		_sync_promise: null,
 		_mount_points: [],
 
 		is_persistent: function () {
@@ -190,23 +191,62 @@ const GodotFS = {
 			GodotFS._mount_points = [];
 			GodotFS._idbfs = false;
 			GodotFS._syncing = false;
+			GodotFS._sync_promise = null;
 		},
 
 		sync: function () {
-			if (GodotFS._syncing) {
-				GodotRuntime.error('Already syncing!');
-				return Promise.resolve();
-			}
-			GodotFS._syncing = true;
-			return new Promise(function (resolve, reject) {
-				FS.syncfs(false, function (error) {
-					if (error) {
-						GodotRuntime.error(`Failed to save IDB file system: ${error.message}`);
-					}
-					GodotFS._syncing = false;
-					resolve(error);
+			const previous_sync = GodotFS._sync_promise || Promise.resolve();
+			const current_sync = previous_sync.then(function () {
+				GodotFS._syncing = true;
+				return new Promise(function (resolve) {
+					let completed = false;
+					let remaining_enoent_retries = 2;
+					const finish = function (error) {
+						if (completed) {
+							return;
+						}
+
+						// IDBFS snapshots the local tree before asynchronously reading
+						// IndexedDB, then reopens the snapshotted paths during reconcile.
+						// A file removed during that gap produces a transient ENOENT even
+						// though the current filesystem state is valid. Reconcile again
+						// from a fresh tree before reporting a persistence failure.
+						if (
+							error
+							&& error.errno === GodotFS.ENOENT
+							&& remaining_enoent_retries > 0
+						) {
+							remaining_enoent_retries -= 1;
+							// eslint-disable-next-line no-use-before-define -- run_sync/finish are mutually recursive.
+							Promise.resolve().then(run_sync);
+							return;
+						}
+
+						completed = true;
+						if (error) {
+							GodotRuntime.error(`Failed to save IDB file system: ${error.message}`);
+						}
+						GodotFS._syncing = false;
+						resolve(error);
+					};
+
+					const run_sync = function () {
+						if (completed) {
+							return;
+						}
+
+						try {
+							FS.syncfs(false, finish);
+						} catch (error) {
+							finish(error);
+						}
+					};
+
+					run_sync();
 				});
 			});
+			GodotFS._sync_promise = current_sync;
+			return current_sync;
 		},
 
 		// Copies a buffer to the internal file system. Creating directories recursively.
