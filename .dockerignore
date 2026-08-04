@@ -1,0 +1,22 @@
+.git/
+.scons_cache/
+**/*.tsbuildinfo
+bin/
+# Keep the platform-neutral Java API stubs. OpenXR is disabled for this
+# dedicated server build, but the clean engine source must remain complete and
+# workflow-faithful rather than hiding required headers.
+platform/android/*
+!platform/android/api/
+!platform/android/api/**
+breaka-v8-builder/.output/
+modules/GodotJS/.git/
+modules/GodotJS/**/node_modules/
+modules/GodotJS/scripts/out/
+modules/GodotJS/tests/
+modules/GodotJS/v8/
+modules/GodotJS/v8-cpp20/
+modules/GodotJS/lws/
+modules/GodotJS/quickjs/
+modules/GodotJS/quickjs-ng/
+index.dwarf
+v8_12.4.254.21.zip

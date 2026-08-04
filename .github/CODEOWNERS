@@ -292,3 +292,7 @@
 *.py                                          @godotengine/buildsystem
 SConstruct                                    @godotengine/buildsystem
 SCsub                                         @godotengine/buildsystem
+
+# Breaka fork additions
+
+/breaka-v8-builder/                           @Benjamin-Dobell
