@@ -104,6 +104,128 @@ const GodotCamera = {
 			GodotRuntime.heapCopy(HEAPU8, p_data, GodotCamera._cachedDataPtr);
 		},
 
+		/**
+		 * Number of buffers kept in a camera's main-thread frame buffer pool.
+		 * Matches the worker's own POOL_SIZE (see the embedded worker code in
+		 * getWorkerBlobUrl) so both paths behave consistently under load.
+		 */
+		MAIN_THREAD_POOL_SIZE: 4,
+
+		/**
+		 * How long getUserMedia() is allowed to hang before camera start fails
+		 * cleanly instead of waiting forever. Generous, so a slow-but-legitimate
+		 * human response to the permission prompt is not mistaken for a hang.
+		 */
+		GET_USER_MEDIA_TIMEOUT_MS: 30000,
+
+		/**
+		 * How long video.play() is allowed to hang once the stream is already live.
+		 * Much shorter than GET_USER_MEDIA_TIMEOUT_MS: nothing here waits on the user.
+		 */
+		VIDEO_PLAY_TIMEOUT_MS: 5000,
+
+		/**
+		 * Ensures a camera's main-thread buffer pool holds MAIN_THREAD_POOL_SIZE
+		 * buffers of the given size, reallocating the whole pool if the required
+		 * size changed (e.g. a resolution change). Only meaningful for capture
+		 * paths that own a caller-supplied destination buffer (WebCodecs' copyTo);
+		 * Canvas 2D's getImageData() always allocates its own buffer internally and
+		 * cannot be pooled at this level.
+		 * @param {CameraResource} camera Camera resource
+		 * @param {number} requiredSize Required buffer size in bytes
+		 */
+		ensureMainThreadBufferPool: function (camera, requiredSize) {
+			if (camera.bufferPoolSize === requiredSize) {
+				return;
+			}
+			camera.bufferPoolSize = requiredSize;
+			camera.bufferPool = [];
+			for (let i = 0; i < GodotCamera.MAIN_THREAD_POOL_SIZE; i++) {
+				camera.bufferPool.push(new ArrayBuffer(requiredSize));
+			}
+		},
+
+		/**
+		 * Acquires a buffer from a camera's main-thread pool.
+		 * @param {CameraResource} camera Camera resource
+		 * @returns {ArrayBuffer|null} A pooled buffer, or null if the pool is
+		 *   momentarily exhausted (caller should skip the frame, not allocate).
+		 */
+		acquireMainThreadBuffer: function (camera) {
+			if (camera.bufferPool.length === 0) {
+				return null;
+			}
+			return camera.bufferPool.pop();
+		},
+
+		/**
+		 * Returns a buffer to a camera's main-thread pool, if it still matches the
+		 * pool's current size (a resolution change may have invalidated it since
+		 * this buffer was acquired).
+		 * @param {CameraResource} camera Camera resource
+		 * @param {ArrayBuffer} buffer Buffer to return
+		 */
+		releaseMainThreadBuffer: function (camera, buffer) {
+			if (buffer && buffer.byteLength === camera.bufferPoolSize) {
+				camera.bufferPool.push(buffer);
+			}
+		},
+
+		/**
+		 * Awaits a promise with a timeout, so a getUserMedia()/play() call that
+		 * never settles (stuck permission prompt, OS-level camera arbitration)
+		 * cannot hang camera startup forever.
+		 * @param {Promise<*>} promise Promise to await
+		 * @param {number} timeoutMs Timeout in milliseconds
+		 * @param {string} timeoutMessage Error message on timeout
+		 * @returns {Promise<*>}
+		 */
+		waitWithTimeout: function (promise, timeoutMs, timeoutMessage) {
+			let timeoutId = null;
+			const timeoutPromise = new Promise((_, reject) => {
+				timeoutId = setTimeout(() => {
+					reject(new Error(timeoutMessage));
+				}, timeoutMs);
+			});
+			return Promise.race([promise, timeoutPromise]).finally(() => {
+				if (timeoutId !== null) {
+					clearTimeout(timeoutId);
+				}
+			});
+		},
+
+		/**
+		 * Stops all tracks in a stream.
+		 * @param {MediaStream|null} stream Stream to stop
+		 * @returns {void}
+		 */
+		stopStream: function (stream) {
+			if (!stream) {
+				return;
+			}
+			stream.getTracks().forEach((track) => track.stop());
+		},
+
+		/**
+		 * Opens a camera stream with a timeout. If the timeout fires first, the
+		 * getUserMedia() call itself is not aborted by the browser - it may still
+		 * resolve later with a live stream nothing is using. That late stream is
+		 * stopped as soon as it arrives so its camera track cannot stay open.
+		 * @param {MediaStreamConstraints} constraints getUserMedia constraints
+		 * @param {number} timeoutMs Timeout in milliseconds
+		 * @param {string} timeoutMessage Error message on timeout
+		 * @returns {Promise<MediaStream>}
+		 */
+		getUserMediaWithTimeout: function (constraints, timeoutMs, timeoutMessage) {
+			const streamPromise = navigator.mediaDevices.getUserMedia(constraints);
+			return GodotCamera.waitWithTimeout(streamPromise, timeoutMs, timeoutMessage).catch((error) => {
+				streamPromise.then((stream) => {
+					GodotCamera.stopStream(stream);
+				}, () => {});
+				throw error;
+			});
+		},
+
 		defaultMinimumCapabilities: {
 			'width': {
 				'min': 1,
@@ -387,12 +509,24 @@ self.onmessage = async function(event) {
 			if (data.videoFrame) {
 				data.videoFrame.close();
 			}
+			// The main thread gates on a single in-flight frame, so every 'videoFrame'
+			// message must be answered or capture stalls permanently.
+			self.postMessage({ type: 'frameSkipped', reason: 'notCapturing' });
+			return;
+		}
+
+		if (!data.videoFrame) {
+			// As with the ImageBitmap path: an empty payload means this browser cannot
+			// deliver the frame to the worker at all, so retrying can never succeed.
+			// Report an error so the capture path falls back instead of spinning.
+			self.postMessage({ type: 'error', message: 'videoFrame message contained no VideoFrame' });
 			return;
 		}
 
 		try {
 			const result = await processVideoFrame(data.videoFrame);
 			if (result === null) {
+				self.postMessage({ type: 'frameSkipped', reason: 'bufferPoolEmpty' });
 				return;
 			}
 			self.postMessage(
@@ -419,12 +553,25 @@ self.onmessage = async function(event) {
 			if (data.imageBitmap) {
 				data.imageBitmap.close();
 			}
+			// The main thread gates on a single in-flight frame, so every 'frame'
+			// message must be answered or capture stalls permanently.
+			self.postMessage({ type: 'frameSkipped', reason: 'notCapturing' });
+			return;
+		}
+
+		if (!data.imageBitmap) {
+			// A frame message with no transferable payload means this browser cannot
+			// deliver ImageBitmaps to the worker at all (observed on iPadOS Safari), so
+			// retrying is futile. Report it as an error to trigger the main-thread
+			// Canvas 2D fallback, which does work there.
+			self.postMessage({ type: 'error', message: 'frame message contained no ImageBitmap' });
 			return;
 		}
 
 		try {
 			const result = processImageBitmap(data.imageBitmap);
 			if (result === null) {
+				self.postMessage({ type: 'frameSkipped', reason: 'bufferPoolEmpty' });
 				return;
 			}
 			self.postMessage(
@@ -620,8 +767,15 @@ self.onmessage = async function(event) {
 				stream.getTracks().forEach((track) => track.stop());
 			}
 
-			if (video && video.parentNode) {
-				video.parentNode.removeChild(video);
+			if (video) {
+				// Release the media resource before removal - DOM garbage collection of the
+				// node does not guarantee prompt teardown of the underlying decoder.
+				video.pause();
+				video.srcObject = null;
+				video.load();
+				if (video.parentNode) {
+					video.parentNode.removeChild(video);
+				}
 			}
 		},
 
@@ -646,6 +800,22 @@ self.onmessage = async function(event) {
 			if (resources.permissionStatus && resources.permissionListener) {
 				camera.permissionStatus = resources.permissionStatus;
 				camera.permissionListener = resources.permissionListener;
+			}
+		},
+
+		/**
+		 * Discards a camera resource created by a failed or canceled start: cleans up
+		 * whatever was already committed to it, then removes the cameras Map entry if
+		 * this is still the current entry for cameraId (a newer start may already have
+		 * replaced it).
+		 * @param {string} cameraId Camera identifier
+		 * @param {CameraResource} camera Camera resource
+		 * @returns {void}
+		 */
+		discardCamera: function (cameraId, camera) {
+			GodotCamera.cleanupCamera(camera);
+			if (GodotCamera.cameras.get(cameraId) === camera) {
+				GodotCamera.cameras.delete(cameraId);
 			}
 		},
 
@@ -747,16 +917,30 @@ self.onmessage = async function(event) {
 							const width = copyRect.width;
 							const height = copyRect.height;
 							const bufferSize = width * height * 4;
-							const pixelBuffer = new Uint8Array(bufferSize);
+							GodotCamera.ensureMainThreadBufferPool(currentCamera, bufferSize);
+							const arrayBuffer = GodotCamera.acquireMainThreadBuffer(currentCamera);
+							if (arrayBuffer === null) {
+								// Pool momentarily exhausted (e.g. GC has not reclaimed a returned
+								// buffer yet); skip this frame rather than allocating an unpooled one.
+								continue;
+							}
+							const pixelBuffer = new Uint8Array(arrayBuffer);
 
-							// eslint-disable-next-line no-await-in-loop
-							await videoFrame.copyTo(pixelBuffer, {
-								rect: copyRect,
-								layout: [{ offset: 0, stride: width * 4 }],
-								format: 'RGBA',
-							});
+							try {
+								// eslint-disable-next-line no-await-in-loop
+								await videoFrame.copyTo(pixelBuffer, {
+									rect: copyRect,
+									layout: [{ offset: 0, stride: width * 4 }],
+									format: 'RGBA',
+								});
+							} catch (copyError) {
+								// Return the buffer to the pool so it is not permanently lost on error.
+								GodotCamera.releaseMainThreadBuffer(currentCamera, arrayBuffer);
+								throw copyError;
+							}
 
 							GodotCamera._heapCopyPixelData(pixelBuffer);
+							GodotCamera.releaseMainThreadBuffer(currentCamera, arrayBuffer);
 
 							GodotCamera.sendGetPixelDataCallback(
 								callback,
@@ -842,6 +1026,13 @@ self.onmessage = async function(event) {
 					} finally {
 						camera.workerFrameInFlight = false;
 					}
+					break;
+
+				case 'frameSkipped':
+					// Transient: capture is stopping, or the buffer pool was momentarily
+					// empty. No pixel data this round, so just release the single-flight
+					// gate and let the loop issue the next frame.
+					camera.workerFrameInFlight = false;
 					break;
 
 				case 'error':
@@ -958,6 +1149,13 @@ self.onmessage = async function(event) {
 
 		/**
 		 * Sets up Canvas 2D-based frame capture (fallback method).
+		 *
+		 * Unlike setupWebCodecsCapture, this path is not pooled: getImageData()
+		 * always allocates its own buffer inside the browser's Canvas
+		 * implementation - there is no Canvas API that writes into a
+		 * caller-supplied buffer - so there is nothing here for us to pool. The
+		 * result is copied directly into the already-reused Wasm heap buffer
+		 * (_heapCopyPixelData), same as every other path.
 		 * @param {CameraResource} camera Camera resource
 		 * @param {string} cameraId Camera identifier
 		 * @param {Function} callback Callback function for frame data
@@ -1085,6 +1283,13 @@ self.onmessage = async function(event) {
 					} finally {
 						camera.workerFrameInFlight = false;
 					}
+					break;
+
+				case 'frameSkipped':
+					// Transient: capture is stopping, or the buffer pool was momentarily
+					// empty. No pixel data this round, so just release the single-flight
+					// gate and let the loop issue the next frame.
+					camera.workerFrameInFlight = false;
 					break;
 
 				case 'error':
@@ -1226,8 +1431,15 @@ self.onmessage = async function(event) {
 				camera.stream.getTracks().forEach((track) => track.stop());
 			}
 
-			if (camera.video && camera.video.parentNode) {
-				camera.video.parentNode.removeChild(camera.video);
+			if (camera.video) {
+				// Release the media resource before removal - DOM garbage collection of the
+				// node does not guarantee prompt teardown of the underlying decoder.
+				camera.video.pause();
+				camera.video.srcObject = null;
+				camera.video.load();
+				if (camera.video.parentNode) {
+					camera.video.parentNode.removeChild(camera.video);
+				}
 			}
 
 			if (camera.canvas && camera.canvas instanceof HTMLCanvasElement && camera.canvas.parentNode) {
@@ -1249,6 +1461,8 @@ self.onmessage = async function(event) {
 			camera.useWebCodecsWorker = false;
 			camera.useWebCodecs = false;
 			camera.useWorker = false;
+			camera.bufferPool = [];
+			camera.bufferPoolSize = 0;
 		},
 
 		api: {
@@ -1317,91 +1531,119 @@ self.onmessage = async function(event) {
 				const deniedCallback = GodotRuntime.get_func(deniedCallbackPtr);
 				const cameraId = deviceId || 'default';
 
+				const cameras = GodotCamera.cameras;
+				let camera = cameras.get(cameraId);
+				if (!camera) {
+					camera = {
+						video: null,
+						canvas: null,
+						canvasContext: null,
+						stream: null,
+						animationFrameId: null,
+						permissionListener: null,
+						permissionStatus: null,
+						trackProcessor: null,
+						frameReader: null,
+						worker: null,
+						useWebCodecsWorker: false,
+						useWebCodecs: false,
+						useWorker: false,
+						workerFrameInFlight: false,
+						facingMode: 0,
+						startGeneration: 0,
+						bufferPool: [],
+						bufferPoolSize: 0,
+					};
+					cameras.set(cameraId, camera);
+				}
+
+				if (camera.stream) {
+					return;
+				}
+
+				camera.startGeneration += 1;
+				const startGeneration = camera.startGeneration;
+				const isCurrentStart = () => GodotCamera.isCurrentCameraStart(cameras, cameraId, camera, startGeneration);
+
+				// Tracked locally (not yet on `camera`) so the catch block below can release
+				// exactly what this attempt created, however far it got.
+				let video = null;
+				let stream = null;
+				let permissionStatus = null;
+				let permissionListener = null;
+
 				try {
-					const cameras = GodotCamera.cameras;
-					let camera = cameras.get(cameraId);
-					if (!camera) {
-						camera = {
-							video: null,
-							canvas: null,
-							canvasContext: null,
-							stream: null,
-							animationFrameId: null,
-							permissionListener: null,
-							permissionStatus: null,
-							trackProcessor: null,
-							frameReader: null,
-							worker: null,
-							useWebCodecsWorker: false,
-							useWebCodecs: false,
-							useWorker: false,
-							workerFrameInFlight: false,
-							facingMode: 0,
-							startGeneration: 0,
-						};
-						cameras.set(cameraId, camera);
+					// Create video element (needed for Canvas 2D fallback).
+					video = document.createElement('video');
+					video.style.display = 'none';
+					video.autoplay = true;
+					// Keep the DOM property quoted so Closure does not rename it. iOS Safari
+					// requires playsInline for continuous hidden getUserMedia video frames.
+					video['playsInline'] = true;
+					document.body.appendChild(video);
+
+					const constraints = {
+						video: {
+							deviceId: deviceId ? { exact: deviceId } : undefined,
+							width: { ideal: width },
+							height: { ideal: height },
+						},
+					};
+					// A stuck permission prompt or OS-level camera arbitration can otherwise
+					// leave this awaiting forever with no recovery. The timeout is generous so
+					// a slow-but-legitimate human response to the permission prompt is not
+					// mistaken for a hang.
+					stream = await GodotCamera.getUserMediaWithTimeout(
+						constraints,
+						GodotCamera.GET_USER_MEDIA_TIMEOUT_MS,
+						'Camera start timed out while waiting for getUserMedia().'
+					);
+					if (!isCurrentStart()) {
+						GodotCamera.releasePendingCameraStart({ video, stream });
+						return;
 					}
 
-					if (!camera.stream) {
-						camera.startGeneration += 1;
-						const startGeneration = camera.startGeneration;
-						const isCurrentStart = () => GodotCamera.isCurrentCameraStart(cameras, cameraId, camera, startGeneration);
+					GodotCamera.commitCameraStartResources(camera, { video, stream });
 
-						// Create video element (needed for Canvas 2D fallback).
-						const video = document.createElement('video');
-						video.style.display = 'none';
-						video.autoplay = true;
-						// Keep the DOM property quoted so Closure does not rename it. iOS Safari
-						// requires playsInline for continuous hidden getUserMedia video frames.
-						video['playsInline'] = true;
-						document.body.appendChild(video);
-
-						const constraints = {
-							video: {
-								deviceId: deviceId ? { exact: deviceId } : undefined,
-								width: { ideal: width },
-								height: { ideal: height },
-							},
-						};
-						const stream = await navigator.mediaDevices.getUserMedia(constraints);
+					const [videoTrack] = stream.getVideoTracks();
+					videoTrack.addEventListener('ended', () => {
 						if (!isCurrentStart()) {
-							GodotCamera.releasePendingCameraStart({ video, stream });
 							return;
 						}
+						GodotCamera.api.stop(cameraId);
+					});
 
-						GodotCamera.commitCameraStartResources(camera, { video, stream });
-
-						const [videoTrack] = stream.getVideoTracks();
-						videoTrack.addEventListener('ended', () => {
-							if (!isCurrentStart()) {
-								return;
-							}
-							GodotCamera.api.stop(cameraId);
-						});
-
-						let permissionStatus = null;
-						let permissionListener = null;
-						const permission = await GodotCamera.queryCameraPermission(cameraId, context, deniedCallback);
-						permissionStatus = permission.permissionStatus;
-						permissionListener = permission.permissionListener;
-						if (!isCurrentStart()) {
-							GodotCamera.releasePendingCameraStart({ video, stream, permissionStatus, permissionListener });
-							return;
-						}
-						if (permissionStatus && permissionListener) {
-							GodotCamera.commitCameraStartResources(camera, { permissionStatus, permissionListener });
-						}
-
-						video.srcObject = stream;
-						await video.play();
-						if (!isCurrentStart()) {
-							GodotCamera.releasePendingCameraStart({ video, stream, permissionStatus, permissionListener });
-							return;
-						}
-
-						GodotCamera.startCameraCapture(camera, cameraId, callback, context, deniedCallback);
+					const permission = await GodotCamera.queryCameraPermission(cameraId, context, deniedCallback);
+					permissionStatus = permission.permissionStatus;
+					permissionListener = permission.permissionListener;
+					if (!isCurrentStart()) {
+						GodotCamera.releasePendingCameraStart({ video, stream, permissionStatus, permissionListener });
+						return;
 					}
+					if (permissionStatus && permissionListener) {
+						GodotCamera.commitCameraStartResources(camera, { permissionStatus, permissionListener });
+					}
+
+					video.srcObject = stream;
+					// The stream is already live by this point, so play() should resolve almost
+					// immediately; a much shorter timeout than getUserMedia's is appropriate.
+					await GodotCamera.waitWithTimeout(
+						video.play(),
+						GodotCamera.VIDEO_PLAY_TIMEOUT_MS,
+						'Camera start timed out while waiting for video.play().'
+					);
+					if (!isCurrentStart()) {
+						GodotCamera.releasePendingCameraStart({ video, stream, permissionStatus, permissionListener });
+						return;
+					}
+
+					GodotCamera.startCameraCapture(camera, cameraId, callback, context, deniedCallback);
 				} catch (error) {
+					// Clean up whatever was committed to `camera` plus whatever is still only
+					// local, so a thrown/timed-out getUserMedia()/play() never leaves an
+					// orphaned hidden <video> element or open camera track behind.
+					GodotCamera.discardCamera(cameraId, camera);
+					GodotCamera.releasePendingCameraStart({ video, stream, permissionStatus, permissionListener });
 					GodotCamera.sendGetPixelDataCallback(callback, context, 0, 0, 0, 0, 0, error.message);
 					if (error && (error.name === 'SecurityError' || error.name === 'NotAllowedError')) {
 						deniedCallback(context);
