@@ -6,6 +6,26 @@ from SCons.Util import WhereIs
 from platform_methods import get_build_version
 
 
+def fix_sourcemap_offset(prefix_js_path, map_file_path):
+    """Offsets the engine's source map so its mappings match its position in the final wrapped bundle."""
+    try:
+        with open(prefix_js_path, "r", encoding="utf-8") as f:
+            line_offset = sum(1 for _ in f)
+
+        if line_offset > 0:
+            with open(map_file_path, "r", encoding="utf-8") as f:
+                map_data = json.load(f)
+
+            # Prepend one semicolon per prepended line to shift the map down.
+            map_data["mappings"] = (";" * line_offset) + map_data.get("mappings", "")
+
+            with open(map_file_path, "w", encoding="utf-8") as f:
+                json.dump(map_data, f)
+            print(f"[SourceMap Fix] Offset godot.js.map by {line_offset} lines.")
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"[SourceMap Fix] Warning: Could not adjust source map offset: {e}")
+
+
 def run_closure_compiler(target, source, env, for_signature):
     closure_bin = os.path.join(
         "/opt/homebrew/Cellar/emscripten/4.0.19/libexec",
@@ -15,6 +35,16 @@ def run_closure_compiler(target, source, env, for_signature):
     )
     cmd = [WhereIs("node"), closure_bin]
     cmd.extend(["--compilation_level", "ADVANCED_OPTIMIZATIONS"])
+
+    # Add Closure mapping flags
+    cmd.extend([
+        "--create_source_map=bin/godot.js.map",
+        "--source_map_include_content",
+        "--variable_renaming_report=bin/js_vars.map",
+        "--property_renaming_report=bin/js_props.map",
+        r"--output_wrapper=%output%//#sourceMappingURL=godot.js.map",
+    ])
+
     for f in env["JSEXTERNS"]:
         cmd.extend(["--externs", f.get_abspath()])
     for f in source:

@@ -1,6 +1,10 @@
 #!/usr/bin/env python
 from misc.utility.scons_hints import *
 
+import sys
+
+from emscripten_helpers import fix_sourcemap_offset
+
 from methods import print_error
 
 Import("env")
@@ -76,6 +80,9 @@ if len(env["EXPORTED_FUNCTIONS"]):
 if len(env["EXPORTED_RUNTIME_METHODS"]):
     sys_env.Append(LINKFLAGS=["-sEXPORTED_RUNTIME_METHODS=" + repr(sorted(list(set(env["EXPORTED_RUNTIME_METHODS"]))))])
 
+worker_script_location_patch = sys_env.File("js/patches/patch_worker_script_location.py")
+sys_env.Append(LINKFLAGS=["--js-transform", sys.executable + " " + worker_script_location_patch.abspath])
+
 build = []
 build_targets = ["#bin/godot${PROGSUFFIX}.js", "#bin/godot${PROGSUFFIX}.wasm"]
 if env["dlink_enabled"]:
@@ -108,6 +115,7 @@ sys_env.Depends(build[0], sys_env["JS_LIBS"])
 sys_env.Depends(build[0], sys_env["JS_PRE"])
 sys_env.Depends(build[0], sys_env["JS_POST"])
 sys_env.Depends(build[0], sys_env["JS_EXTERNS"])
+sys_env.Depends(build[0], worker_script_location_patch)
 
 engine = [
     "js/engine/features.js",
@@ -126,6 +134,18 @@ wrap_list = [
 js_wrapped = env.NoCache(
     env.Textfile("#bin/godot", [env.File(f) for f in wrap_list], TEXTFILESUFFIX="${PROGSUFFIX}.wrapped.js")
 )
+
+if env["use_closure_compiler"]:
+    # The wrapped JS concatenates build[0] (the emcc runtime) before js_engine, so js_engine's
+    # own source map (mapped relative to its standalone file) needs shifting down by build[0]'s
+    # line count to match its actual position in the final bundle.
+    env.AddPostAction(
+        js_wrapped,
+        env.Action(
+            lambda target, source, env: fix_sourcemap_offset(source[0].get_abspath(), "bin/godot.js.map"),
+            "Fixing Engine source map offset",
+        ),
+    )
 
 # 0 - unwrapped js file (use wrapped one instead)
 # 1 - wasm file
