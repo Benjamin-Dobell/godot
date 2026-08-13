@@ -50,6 +50,7 @@ default_template_version() {
     status="$(awk -F= '/^status[[:space:]]*=/ { gsub(/['\''[:space:]]/, "", $2); print $2; exit }' "${version_file}")"
 
     if [ -n "${major}" ] && [ -n "${minor}" ] && [ -n "${status}" ]; then
+      status="${status//\"/}"
       printf '%s.%s.%s\n' "${major}" "${minor}" "${status}"
       return
     fi
