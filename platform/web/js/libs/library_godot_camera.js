@@ -41,6 +41,8 @@
  *   canvasContext: (CanvasRenderingContext2D|OffscreenCanvasRenderingContext2D)|null
  *   stream: MediaStream|null
  *   animationFrameId: number|null
+ *   captureTimerId: number|null
+ *   lastCapturedVideoTime: number|null
  *   permissionListener: Function|null
  *   permissionStatus: PermissionStatus|null
  *   trackProcessor: MediaStreamTrackProcessor|null
@@ -395,37 +397,40 @@ function acquireBuffer() {
 
 // Process ImageBitmap using Canvas 2D (fallback method)
 function processImageBitmap(imageBitmap) {
-	const frameWidth = imageBitmap.width;
-	const frameHeight = imageBitmap.height;
+	try {
+		const frameWidth = imageBitmap.width;
+		const frameHeight = imageBitmap.height;
 
-	if (canvas.width !== frameWidth || canvas.height !== frameHeight) {
-		canvas.width = frameWidth;
-		canvas.height = frameHeight;
-		width = frameWidth;
-		height = frameHeight;
-		canvasContext = canvas.getContext('2d', { willReadFrequently: true });
+		if (canvas.width !== frameWidth || canvas.height !== frameHeight) {
+			canvas.width = frameWidth;
+			canvas.height = frameHeight;
+			width = frameWidth;
+			height = frameHeight;
+			canvasContext = canvas.getContext('2d', { willReadFrequently: true });
+		}
+
+		canvasContext.drawImage(imageBitmap, 0, 0, width, height);
+		const imageData = canvasContext.getImageData(0, 0, width, height);
+
+		const requiredSize = width * height * 4;
+		ensureBufferPool(requiredSize);
+
+		const arrayBuffer = acquireBuffer();
+		if (arrayBuffer === null) {
+			return null;
+		}
+
+		const poolBuffer = new Uint8Array(arrayBuffer);
+		poolBuffer.set(imageData.data);
+
+		return {
+			pixelData: poolBuffer,
+			width: width,
+			height: height,
+		};
+	} finally {
+		imageBitmap.close();
 	}
-
-	canvasContext.drawImage(imageBitmap, 0, 0, width, height);
-	const imageData = canvasContext.getImageData(0, 0, width, height);
-	imageBitmap.close();
-
-	const requiredSize = width * height * 4;
-	ensureBufferPool(requiredSize);
-
-	const arrayBuffer = acquireBuffer();
-	if (arrayBuffer === null) {
-		return null;
-	}
-
-	const poolBuffer = new Uint8Array(arrayBuffer);
-	poolBuffer.set(imageData.data);
-
-	return {
-		pixelData: poolBuffer,
-		width: width,
-		height: height,
-	};
 }
 
 // Process VideoFrame using WebCodecs copyTo (most efficient)
@@ -1167,6 +1172,22 @@ self.onmessage = async function(event) {
 			if (camera.animationFrameId) {
 				cancelAnimationFrame(camera.animationFrameId);
 			}
+			if (camera.captureTimerId) {
+				clearTimeout(camera.captureTimerId);
+			}
+			camera.lastCapturedVideoTime = null;
+
+			// iOS 15 does not expose WebCodecs or OffscreenCanvas, so this path is
+			// driven by a timer instead of requestAnimationFrame. The camera track
+			// normally produces 30 frames per second; polling at that cadence avoids
+			// waking WebContent twice as often while retaining the currentTime gate.
+			const [videoTrack] = camera.stream ? camera.stream.getVideoTracks() : [];
+			const trackFrameRate = videoTrack && videoTrack.getSettings
+				? videoTrack.getSettings().frameRate
+				: null;
+			camera.captureIntervalMs = Number.isFinite(trackFrameRate) && trackFrameRate > 0
+				? Math.max(33, Math.round(1000 / trackFrameRate))
+				: 33;
 
 			const captureFrame = () => {
 				const cameras = GodotCamera.cameras;
@@ -1186,61 +1207,70 @@ self.onmessage = async function(event) {
 				if (video.readyState === video.HAVE_ENOUGH_DATA) {
 					const _width = video.videoWidth;
 					const _height = video.videoHeight;
+					const currentVideoTime = video.currentTime;
+					const hasNewVideoFrame = !Number.isFinite(currentVideoTime)
+						|| currentVideoTime !== currentCamera.lastCapturedVideoTime;
 
-					// Ensure canvas matches current video dimensions.
-					if (!currentCamera.canvas) {
-						if (typeof OffscreenCanvas !== 'undefined') {
-							currentCamera.canvas = new OffscreenCanvas(_width, _height);
-						} else {
-							currentCamera.canvas = document.createElement('canvas');
-							currentCamera.canvas.style.display = 'none';
-							document.body.appendChild(currentCamera.canvas);
+					if (hasNewVideoFrame) {
+						currentCamera.lastCapturedVideoTime = Number.isFinite(currentVideoTime)
+							? currentVideoTime
+							: null;
+
+						// Ensure canvas matches current video dimensions.
+						if (!currentCamera.canvas) {
+							if (typeof OffscreenCanvas !== 'undefined') {
+								currentCamera.canvas = new OffscreenCanvas(_width, _height);
+							} else {
+								currentCamera.canvas = document.createElement('canvas');
+								currentCamera.canvas.style.display = 'none';
+								document.body.appendChild(currentCamera.canvas);
+							}
 						}
-					}
 
-					if (currentCamera.canvas.width !== _width || currentCamera.canvas.height !== _height) {
-						currentCamera.canvas.width = _width;
-						currentCamera.canvas.height = _height;
-						currentCamera.canvasContext = null;
-					}
-
-					if (!currentCamera.canvasContext) {
-						currentCamera.canvasContext = currentCamera.canvas.getContext('2d', { willReadFrequently: true });
-					}
-
-					try {
-						currentCamera.canvasContext.drawImage(video, 0, 0, _width, _height);
-						const imageData = currentCamera.canvasContext.getImageData(0, 0, _width, _height);
-						const pixelData = imageData.data;
-
-						GodotCamera._heapCopyPixelData(pixelData);
-
-						GodotCamera.sendGetPixelDataCallback(
-							callback,
-							context,
-							GodotCamera._cachedDataPtr,
-							pixelData.length,
-							_width,
-							_height,
-							currentCamera.facingMode,
-							null
-						);
-					} catch (error) {
-						GodotCamera.sendGetPixelDataCallback(callback, context, 0, 0, 0, 0, 0, error.message);
-
-						if (error.name === 'SecurityError' || error.name === 'NotAllowedError') {
-							GodotRuntime.print('Security error, stopping stream:', error);
-							GodotCamera.api.stop(cameraId);
-							deniedCallback(context);
+						if (currentCamera.canvas.width !== _width || currentCamera.canvas.height !== _height) {
+							currentCamera.canvas.width = _width;
+							currentCamera.canvas.height = _height;
+							currentCamera.canvasContext = null;
 						}
-						return;
+
+						if (!currentCamera.canvasContext) {
+							currentCamera.canvasContext = currentCamera.canvas.getContext('2d', { willReadFrequently: true });
+						}
+
+						try {
+							currentCamera.canvasContext.drawImage(video, 0, 0, _width, _height);
+							const imageData = currentCamera.canvasContext.getImageData(0, 0, _width, _height);
+							const pixelData = imageData.data;
+
+							GodotCamera._heapCopyPixelData(pixelData);
+
+							GodotCamera.sendGetPixelDataCallback(
+								callback,
+								context,
+								GodotCamera._cachedDataPtr,
+								pixelData.length,
+								_width,
+								_height,
+								currentCamera.facingMode,
+								null
+							);
+						} catch (error) {
+							GodotCamera.sendGetPixelDataCallback(callback, context, 0, 0, 0, 0, 0, error.message);
+
+							if (error.name === 'SecurityError' || error.name === 'NotAllowedError') {
+								GodotRuntime.print('Security error, stopping stream:', error);
+								GodotCamera.api.stop(cameraId);
+								deniedCallback(context);
+							}
+							return;
+						}
 					}
 				}
 
-				currentCamera.animationFrameId = requestAnimationFrame(captureFrame);
+				currentCamera.captureTimerId = setTimeout(captureFrame, currentCamera.captureIntervalMs);
 			};
 
-			camera.animationFrameId = requestAnimationFrame(captureFrame);
+			captureFrame();
 		},
 
 		/**
@@ -1426,6 +1456,9 @@ self.onmessage = async function(event) {
 			if (camera.animationFrameId) {
 				cancelAnimationFrame(camera.animationFrameId);
 			}
+			if (camera.captureTimerId) {
+				clearTimeout(camera.captureTimerId);
+			}
 
 			if (camera.stream) {
 				camera.stream.getTracks().forEach((track) => track.stop());
@@ -1454,6 +1487,8 @@ self.onmessage = async function(event) {
 
 			// Null out references to help GC.
 			camera.animationFrameId = null;
+			camera.captureTimerId = null;
+			camera.lastCapturedVideoTime = null;
 			camera.canvasContext = null;
 			camera.stream = null;
 			camera.video = null;
@@ -1540,6 +1575,8 @@ self.onmessage = async function(event) {
 						canvasContext: null,
 						stream: null,
 						animationFrameId: null,
+						captureTimerId: null,
+						lastCapturedVideoTime: null,
 						permissionListener: null,
 						permissionStatus: null,
 						trackProcessor: null,
