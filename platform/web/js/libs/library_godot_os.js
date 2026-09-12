@@ -250,7 +250,7 @@ const GodotFS = {
 		},
 
 		// Copies a buffer to the internal file system. Creating directories recursively.
-		copy_to_fs: function (path, buffer) {
+		copy_to_fs: function (path, buffer, canOwn = false) {
 			const idx = path.lastIndexOf('/');
 			let dir = '/';
 			if (idx > 0) {
@@ -265,7 +265,22 @@ const GodotFS = {
 				}
 				FS.mkdirTree(dir);
 			}
-			FS.writeFile(path, new Uint8Array(buffer));
+			// Keep the public copyToFS/preloadFile path byte-for-byte non-owning.
+			// Engine.start() passes canOwn only for internally fetched preloader
+			// buffers whose ownership is transferred to MEMFS after this call.
+			if (!canOwn) {
+				FS.writeFile(path, new Uint8Array(buffer));
+				return;
+			}
+			let data;
+			if (buffer instanceof Uint8Array) {
+				data = buffer;
+			} else if (ArrayBuffer.isView(buffer)) {
+				data = new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+			} else {
+				data = new Uint8Array(buffer);
+			}
+			FS.writeFile(path, data, { canOwn: true });
 		},
 	},
 };

@@ -135,6 +135,7 @@ const Preloader = /** @constructor */ function () { // eslint-disable-line no-un
 				me.preloadedFiles.push({
 					path: destPath || pathOrBuffer,
 					buffer: buf,
+					canOwn: true,
 				});
 				return Promise.resolve();
 			});
@@ -147,6 +148,7 @@ const Preloader = /** @constructor */ function () { // eslint-disable-line no-un
 			this.preloadedFiles.push({
 				path: destPath,
 				buffer: pathOrBuffer,
+				canOwn: false,
 			});
 			return Promise.resolve();
 		}

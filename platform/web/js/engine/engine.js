@@ -178,7 +178,10 @@ const Engine = (function () {
 					}
 					return new Promise(function (resolve, reject) {
 						for (const file of preloader.preloadedFiles) {
-							me.rtenv['copyToFS'](file.path, file.buffer);
+							// Only buffers fetched by the preloader are consumed by MEMFS and
+							// never exposed to the caller again. Caller-supplied preloadFile
+							// buffers retain the public non-owning copy contract.
+							me.rtenv['copyToFS'](file.path, file.buffer, file.canOwn === true);
 						}
 						preloader.preloadedFiles.length = 0; // Clear memory
 						me.rtenv['callMain'](me.config.args);
