@@ -32,10 +32,22 @@
 
 #include "core/error/error_macros.h"
 
+#include <cstdint>
 #include <new> // IWYU pragma: keep // `new` operators.
 #include <type_traits>
+#include <vector>
 
 namespace Memory {
+
+struct AllocationProfileRecord {
+	uint64_t callsite = 0;
+	uint64_t live_bytes = 0;
+	uint64_t peak_live_bytes = 0;
+	uint64_t live_blocks = 0;
+	uint64_t allocation_count = 0;
+	uint64_t free_count = 0;
+};
+
 constexpr size_t get_aligned_address(size_t p_address, size_t p_alignment) {
 	const size_t n_bytes_unaligned = p_address % p_alignment;
 	return (n_bytes_unaligned == 0) ? p_address : (p_address + p_alignment - n_bytes_unaligned);
@@ -96,6 +108,10 @@ void free_aligned_static(void *p_memory);
 uint64_t get_mem_available();
 uint64_t get_mem_usage();
 uint64_t get_mem_max_usage();
+void set_allocation_profile_enabled(bool p_enabled);
+void reset_allocation_profile();
+bool is_allocation_profile_enabled();
+std::vector<AllocationProfileRecord> get_allocation_profile();
 }; //namespace Memory
 
 class DefaultAllocator {
