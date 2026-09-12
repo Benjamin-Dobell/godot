@@ -1400,20 +1400,27 @@ void ProjectExportDialog::_export_pck_zip_selected(const String &p_path) {
 	EditorSettings::get_singleton()->set_project_metadata("export_options", "export_debug", export_debug);
 	EditorSettings::get_singleton()->set_project_metadata("export_options", "export_as_patch", export_as_patch);
 
+	platform->clear_messages();
+	Error err = OK;
 	if (p_path.ends_with(".zip")) {
 		if (export_as_patch) {
-			platform->export_zip_patch(current, export_debug, p_path);
+			err = platform->export_zip_patch(current, export_debug, p_path);
 		} else {
-			platform->export_zip(current, export_debug, p_path);
+			err = platform->export_zip(current, export_debug, p_path);
 		}
 	} else if (p_path.ends_with(".pck")) {
 		if (export_as_patch) {
-			platform->export_pack_patch(current, export_debug, p_path);
+			err = platform->export_pack_patch(current, export_debug, p_path);
 		} else {
-			platform->export_pack(current, export_debug, p_path);
+			err = platform->export_pack(current, export_debug, p_path);
 		}
 	} else {
 		ERR_FAIL_MSG("Path must end with .pck or .zip");
+	}
+
+	result_dialog_log->clear();
+	if (err != ERR_SKIP && platform->fill_log_messages(result_dialog_log, err)) {
+		result_dialog->popup_centered_ratio(0.5);
 	}
 }
 

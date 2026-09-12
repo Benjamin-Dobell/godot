@@ -800,6 +800,9 @@ EditorExportPlatform::ExportNotifier::ExportNotifier(EditorExportPlatform &p_pla
 	if (!enabled) {
 		return;
 	}
+	// Only the outermost (enabled) notifier opens the error window, so a nested
+	// export cannot drop errors raised by plugins at the start of the export.
+	p_platform._begin_export_notifier();
 	HashSet<String> features = p_platform.get_features(p_preset, p_debug);
 	Vector<Ref<EditorExportPlugin>> export_plugins = EditorExport::get_singleton()->get_export_plugins();
 	//initial export plugin callback
@@ -815,6 +818,20 @@ EditorExportPlatform::ExportNotifier::ExportNotifier(EditorExportPlatform &p_pla
 			export_plugins.write[i]->_export_begin(features, p_debug, p_path, p_flags);
 		}
 	}
+}
+
+void EditorExportPlatform::_begin_export_notifier() {
+	export_message_start = messages.size();
+}
+
+bool EditorExportPlatform::has_export_errors() const {
+	const int start = MIN(export_message_start, messages.size());
+	for (int i = start; i < messages.size(); i++) {
+		if (messages[i].msg_type >= EXPORT_MESSAGE_ERROR) {
+			return true;
+		}
+	}
+	return false;
 }
 
 EditorExportPlatform::ExportNotifier::~ExportNotifier() {
@@ -1861,6 +1878,10 @@ Error EditorExportPlatform::export_project_files(const Ref<EditorExportPreset> &
 		}
 	}
 
+	if (has_export_errors()) {
+		return FAILED;
+	}
+
 	return OK;
 }
 
@@ -2288,6 +2309,9 @@ bool EditorExportPlatform::_encrypt_and_store_directory(Ref<FileAccess> p_fd, Pa
 
 Error EditorExportPlatform::save_pack(const Ref<EditorExportPreset> &p_preset, bool p_debug, const String &p_path, Vector<SharedObject> *p_so_files, EditorExportSaveFunction p_save_func, EditorExportRemoveFunction p_remove_func, bool p_embed, int64_t *r_embedded_start, int64_t *r_embedded_size) {
 	EditorProgress ep("savepack", TTR("Packing"), 102, true);
+	if (has_export_errors()) {
+		return FAILED;
+	}
 
 	if (p_save_func == nullptr) {
 		p_save_func = _save_pack_file;
@@ -2354,13 +2378,25 @@ Error EditorExportPlatform::save_pack(const Ref<EditorExportPreset> &p_preset, b
 
 	Error err = export_project_files(p_preset, p_debug, p_save_func, p_remove_func, &pd, _pack_add_shared_object);
 
-	if (err != OK) {
-		add_message(EXPORT_MESSAGE_ERROR, TTR("Save PCK"), TTR("Failed to export project files."));
+	if (err != OK || has_export_errors()) {
+		if (err == OK) {
+			err = FAILED;
+		} else {
+			add_message(EXPORT_MESSAGE_ERROR, TTR("Save PCK"), TTR("Failed to export project files."));
+		}
+		f->close();
+		if (!p_embed) {
+			da->remove(p_path);
+		}
 		return err;
 	}
 
 	if (pd.file_ofs.is_empty()) {
 		add_message(EXPORT_MESSAGE_ERROR, TTR("Save PCK"), TTR("No files or changes to export."));
+		f->close();
+		if (!p_embed) {
+			da->remove(p_path);
+		}
 		return FAILED;
 	}
 
@@ -2384,6 +2420,10 @@ Error EditorExportPlatform::save_pack(const Ref<EditorExportPreset> &p_preset, b
 
 	if (!_encrypt_and_store_directory(f, pd, key, p_preset->get_seed(), file_base)) {
 		add_message(EXPORT_MESSAGE_ERROR, TTR("Save PCK"), TTR("Can't create encrypted file."));
+		f->close();
+		if (!p_embed) {
+			da->remove(p_path);
+		}
 		return ERR_CANT_CREATE;
 	}
 
@@ -2414,6 +2454,9 @@ Error EditorExportPlatform::save_pack_patch(const Ref<EditorExportPreset> &p_pre
 
 Error EditorExportPlatform::save_zip(const Ref<EditorExportPreset> &p_preset, bool p_debug, const String &p_path, Vector<SharedObject> *p_so_files, EditorExportSaveFunction p_save_func) {
 	EditorProgress ep("savezip", TTR("Packing"), 102, true);
+	if (has_export_errors()) {
+		return FAILED;
+	}
 
 	if (p_save_func == nullptr) {
 		p_save_func = _save_zip_file;
@@ -2431,9 +2474,16 @@ Error EditorExportPlatform::save_zip(const Ref<EditorExportPreset> &p_preset, bo
 	zd.so_files = p_so_files;
 
 	Error err = export_project_files(p_preset, p_debug, p_save_func, nullptr, &zd, _zip_add_shared_object);
-	if (err != OK && err != ERR_SKIP) {
-		add_message(EXPORT_MESSAGE_ERROR, TTR("Save ZIP"), TTR("Failed to export project files."));
+	const bool export_failed = has_export_errors();
+	if (export_failed || (err != OK && err != ERR_SKIP)) {
+		if (err == OK || err == ERR_SKIP) {
+			err = FAILED;
+		} else {
+			add_message(EXPORT_MESSAGE_ERROR, TTR("Save ZIP"), TTR("Failed to export project files."));
+		}
 		zipClose(zip, nullptr);
+		Ref<DirAccess> da = DirAccess::create(DirAccess::ACCESS_FILESYSTEM);
+		da->remove(tmppath);
 		return err;
 	}
 
@@ -2462,35 +2512,55 @@ Error EditorExportPlatform::save_zip_patch(const Ref<EditorExportPreset> &p_pres
 }
 
 Error EditorExportPlatform::export_pack(const Ref<EditorExportPreset> &p_preset, bool p_debug, const String &p_path, BitField<EditorExportPlatform::DebugFlags> p_flags) {
-	ExportNotifier notifier(*this, p_preset, p_debug, p_path, p_flags);
-	return save_pack(p_preset, p_debug, p_path);
+	Error err;
+	{
+		ExportNotifier notifier(*this, p_preset, p_debug, p_path, p_flags);
+		err = has_export_errors() ? FAILED : save_pack(p_preset, p_debug, p_path);
+	}
+	return has_export_errors() ? FAILED : err;
 }
 
 Error EditorExportPlatform::export_zip(const Ref<EditorExportPreset> &p_preset, bool p_debug, const String &p_path, BitField<EditorExportPlatform::DebugFlags> p_flags) {
-	ExportNotifier notifier(*this, p_preset, p_debug, p_path, p_flags);
-	return save_zip(p_preset, p_debug, p_path);
+	Error err;
+	{
+		ExportNotifier notifier(*this, p_preset, p_debug, p_path, p_flags);
+		err = has_export_errors() ? FAILED : save_zip(p_preset, p_debug, p_path);
+	}
+	return has_export_errors() ? FAILED : err;
 }
 
 Error EditorExportPlatform::export_pack_patch(const Ref<EditorExportPreset> &p_preset, bool p_debug, const String &p_path, const Vector<String> &p_patches, BitField<EditorExportPlatform::DebugFlags> p_flags) {
-	ExportNotifier notifier(*this, p_preset, p_debug, p_path, p_flags);
-	Error err = _load_patches(p_preset, p_patches.is_empty() ? p_preset->get_patches() : p_patches);
-	if (err != OK) {
-		return err;
+	Error err;
+	{
+		ExportNotifier notifier(*this, p_preset, p_debug, p_path, p_flags);
+		if (has_export_errors()) {
+			err = FAILED;
+		} else {
+			err = _load_patches(p_preset, p_patches.is_empty() ? p_preset->get_patches() : p_patches);
+			if (err == OK) {
+				err = save_pack_patch(p_preset, p_debug, p_path);
+			}
+			_unload_patches();
+		}
 	}
-	err = save_pack_patch(p_preset, p_debug, p_path);
-	_unload_patches();
-	return err;
+	return has_export_errors() ? FAILED : err;
 }
 
 Error EditorExportPlatform::export_zip_patch(const Ref<EditorExportPreset> &p_preset, bool p_debug, const String &p_path, const Vector<String> &p_patches, BitField<EditorExportPlatform::DebugFlags> p_flags) {
-	ExportNotifier notifier(*this, p_preset, p_debug, p_path, p_flags);
-	Error err = _load_patches(p_preset, p_patches.is_empty() ? p_preset->get_patches() : p_patches);
-	if (err != OK) {
-		return err;
+	Error err;
+	{
+		ExportNotifier notifier(*this, p_preset, p_debug, p_path, p_flags);
+		if (has_export_errors()) {
+			err = FAILED;
+		} else {
+			err = _load_patches(p_preset, p_patches.is_empty() ? p_preset->get_patches() : p_patches);
+			if (err == OK) {
+				err = save_zip_patch(p_preset, p_debug, p_path);
+			}
+			_unload_patches();
+		}
 	}
-	err = save_zip_patch(p_preset, p_debug, p_path);
-	_unload_patches();
-	return err;
+	return has_export_errors() ? FAILED : err;
 }
 
 Vector<String> EditorExportPlatform::gen_export_flags(BitField<EditorExportPlatform::DebugFlags> p_flags) {

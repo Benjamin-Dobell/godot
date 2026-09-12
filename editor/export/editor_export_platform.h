@@ -119,6 +119,7 @@ private:
 	};
 
 	Vector<ExportMessage> messages;
+	int export_message_start = 0;
 	Vector<String> patch_temp_dirs;
 
 	void _export_find_resources(EditorFileSystemDirectory *p_dir, HashSet<String> &p_paths);
@@ -176,6 +177,9 @@ protected:
 		ExportNotifier(EditorExportPlatform &p_platform, const Ref<EditorExportPreset> &p_preset, bool p_debug, const String &p_path, BitField<EditorExportPlatform::DebugFlags> p_flags, bool p_enabled = true);
 		~ExportNotifier();
 	};
+
+	void _begin_export_notifier();
+	bool has_export_errors() const;
 
 	HashSet<String> get_features(const Ref<EditorExportPreset> &p_preset, bool p_debug) const;
 
@@ -252,7 +256,10 @@ public:
 	virtual Ref<EditorExportPreset> create_preset();
 	virtual bool is_executable(const String &p_path) const { return false; }
 
-	virtual void clear_messages() { messages.clear(); }
+	virtual void clear_messages() {
+		messages.clear();
+		export_message_start = 0;
+	}
 	virtual void add_message(ExportMessageType p_type, const String &p_category, const String &p_message) {
 		ExportMessage msg;
 		msg.category = p_category;
